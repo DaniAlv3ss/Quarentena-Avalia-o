@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <title>Auditor Pro</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <!-- CDNs -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- INCLUSÃO CSS -->
+  <?!= include('Styles'); ?>
+  <!-- INCLUSÃO REPORTS -->
+  <?!= include('ReportsJS'); ?>
+
+</head>
+<body class="h-screen overflow-hidden flex font-sans antialiased bg-slate-50">
+
+  <div id="app" class="flex w-full h-full" v-cloak>
+    
+    <!-- TOAST NOTIFICATIONS -->
+    <div class="fixed top-6 right-6 z-[100] flex flex-col gap-3 pointer-events-none">
+      <transition-group name="list">
+        <div v-for="t in toasts" :key="t.id" :class="t.type === 'error' ? 'bg-red-600' : 'bg-kabumblue-900'" class="pointer-events-auto text-white px-4 py-3 rounded-lg shadow-xl flex items-center gap-4 min-w-[320px] animate-toast-slide">
+          <i :class="t.type === 'error' ? 'fa-solid fa-circle-exclamation' : 'fa-solid fa-check-circle text-brand-500'" class="text-lg"></i>
+          <div class="flex-1"><p class="text-sm font-medium">{{ t.message }}</p><button v-if="t.undoAction" @click="t.undoAction()" class="text-xs text-brand-200 hover:text-white underline mt-1 font-bold">Desfazer</button></div>
+          <button @click="removeToast(t.id)" class="text-white/60 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+      </transition-group>
+    </div>
+
+    <!-- BULK ACTIONS -->
+    <transition name="slide-up">
+      <div v-if="(selectedRows || []).length > 0" class="fixed bottom-8 left-1/2 -translate-x-1/2 z-[90] bg-white text-slate-800 px-2 py-2 rounded-2xl shadow-2xl flex items-center gap-4 border border-slate-200 ring-1 ring-slate-900/5">
+        <div class="flex items-center gap-3 px-4 border-r border-slate-100">
+          <span class="bg-brand-600 text-white text-xs font-bold px-2.5 py-1 rounded-md">{{ (selectedRows || []).length }}</span>
+          <span class="text-sm font-semibold text-slate-600">Selecionados</span>
+        </div>
+        <div class="flex gap-2">
+          <button @click="bulkDecide('ok_pagamento')" class="group relative px-4 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl transition-all font-bold text-xs flex items-center gap-2"><i class="fa-solid fa-check"></i> Pagar</button>
+          <button @click="bulkDecide('avaria_parceiro')" class="group relative px-4 py-2 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-xl transition-all font-bold text-xs flex items-center gap-2"><i class="fa-solid fa-triangle-exclamation"></i> Avariado</button>
+          <button @click="bulkDecide('nao_pagar')" class="group relative px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl transition-all font-bold text-xs flex items-center gap-2"><i class="fa-solid fa-xmark"></i> Reprovar</button>
+        </div>
+        <button @click="selectedRows = []" class="px-3 text-slate-400 hover:text-slate-600 transition-colors"><i class="fa-solid fa-times"></i></button>
+      </div>
+    </transition>
+
+    <!-- MODALS (CF, Occurrence, General) -->
+    <!-- CF DETAILS MODAL -->
+    <transition name="fade">
+      <div v-if="cfModal.show && cfModal.item" class="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
+        <div class="bg-white rounded-3xl shadow-2xl max-w-lg w-full p-0 animate-slide-up border border-slate-100 overflow-hidden">
+          <div class="bg-brand-50 p-6 border-b border-brand-100 flex justify-between items-start">
+             <div><h3 class="text-xl font-extrabold text-brand-900">Detalhes de Custos</h3><p class="text-brand-600/70 text-sm font-medium mt-1">OS: {{ cfModal.item.OS || cfModal.item['NÚMERO OS'] }}</p></div>
+             <button @click="closeCfModal" class="text-brand-400 hover:text-brand-700 transition-colors"><i class="fa-solid fa-xmark text-xl"></i></button>
+          </div>
+          <div class="p-6 space-y-4">
+            <div class="p-4 bg-slate-50 rounded-2xl border border-slate-200">
+               <span class="text-xs font-bold text-slate-500 uppercase tracking-wide">Produto Antigo</span>
+               <div v-if="cfModal.item['CF PRODUTO ANTIGO']">
+                 <div class="text-lg font-bold text-slate-800 mb-1">CF: {{ cfModal.item['CF PRODUTO ANTIGO'] }}</div>
+                 <div class="text-sm font-mono text-slate-600 mb-3">{{ formatMoney(cfModal.item._custoAntigo) }}</div>
+                 <a :href="kabumUrl(cfModal.item['CF PRODUTO ANTIGO'])" target="_blank" class="text-xs font-bold text-brand-600 hover:underline flex items-center gap-1"><i class="fa-solid fa-up-right-from-square"></i> Ver no Site KaBuM!</a>
+               </div>
+               <div v-else class="text-sm text-slate-400 italic">Não informado</div>
+            </div>
+            <div class="p-4 bg-slate-50 rounded-2xl border border-slate-200">
+               <span class="text-xs font-bold text-slate-500 uppercase tracking-wide">Produto Novo</span>
+               <div v-if="cfModal.item['CF PRODUTO NOVO']">
+                 <div class="text-lg font-bold text-slate-800 mb-1">CF: {{ cfModal.item['CF PRODUTO NOVO'] }}</div>
+                 <div class="text-sm font-mono text-slate-600 mb-3">{{ formatMoney(cfModal.item._custoNovo) }}</div>
+                 <a :href="kabumUrl(cfModal.item['CF PRODUTO NOVO'])" target="_blank" class="text-xs font-bold text-brand-600 hover:underline flex items-center gap-1"><i class="fa-solid fa-up-right-from-square"></i> Ver no Site KaBuM!</a>
+               </div>
+               <div v-else class="text-sm text-slate-400 italic">Não informado</div>
+            </div>
+            <div class="pt-4 border-t border-slate-100 flex justify-between items-center">
+               <span class="text-sm font-bold text-slate-500">Custo Total da Troca</span>
+               <span class="text-2xl font-extrabold text-brand-600">{{ formatMoney(cfModal.item._custoTotal) }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <!-- OCCURRENCE MODAL -->
+    <transition name="fade">
+      <div v-if="occurrenceModal.show && occurrenceModal.item" class="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+        <div class="bg-white rounded-3xl shadow-2xl max-w-2xl w-full p-0 animate-slide-up border border-slate-100 overflow-hidden">
+          <div class="bg-brand-50 p-6 border-b border-brand-100 flex justify-between items-start">
+             <div><h3 class="text-xl font-extrabold text-brand-900 flex items-center gap-2"><i class="fa-solid fa-clipboard-list"></i> Detalhes da Ocorrência</h3><p class="text-brand-600/70 text-sm font-medium mt-1">OS: {{ occurrenceModal.item.os }}</p></div>
+             <button @click="closeOccurrenceModal" class="text-brand-400 hover:text-brand-700 transition-colors"><i class="fa-solid fa-xmark text-xl"></i></button>
+          </div>
+          <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-slate-600">
+             <div class="space-y-4">
+               <div><span class="block text-xs font-bold text-slate-400 uppercase">Processo?</span> <span class="font-medium text-slate-800">{{ occurrenceModal.item.processo || '-' }}</span></div>
+               <div><span class="block text-xs font-bold text-slate-400 uppercase">Qual Problema?</span> <span class="font-medium text-slate-800">{{ occurrenceModal.item.problema || '-' }}</span></div>
+               <div><span class="block text-xs font-bold text-slate-400 uppercase">Tipo de Problema?</span> <span class="font-medium text-slate-800">{{ occurrenceModal.item.tipoProb || '-' }}</span></div>
+               <div><span class="block text-xs font-bold text-slate-400 uppercase">Tipo de Troca</span> <span class="font-medium text-slate-800">{{ occurrenceModal.item.tipoTroca || '-' }}</span></div>
+             </div>
+             <div class="space-y-4">
+               <div><span class="block text-xs font-bold text-slate-400 uppercase">Início Tratativa</span> <span class="font-medium text-slate-800">{{ occurrenceModal.item.inicio || '-' }}</span></div>
+               <div><span class="block text-xs font-bold text-slate-400 uppercase">Fim Tratativa</span> <span class="font-medium text-slate-800">{{ occurrenceModal.item.fim || '-' }}</span></div>
+               <div><span class="block text-xs font-bold text-slate-400 uppercase">Pedido</span> <span class="font-medium text-slate-800">{{ occurrenceModal.item.pedido || '-' }}</span></div>
+               <div><span class="block text-xs font-bold text-slate-400 uppercase">Produto Divergente</span> <span class="font-medium text-slate-800">{{ occurrenceModal.item.produtoDiv || '-' }}</span></div>
+             </div>
+             <div class="md:col-span-2 mt-2 pt-4 border-t border-slate-100">
+                <span class="block text-xs font-bold text-slate-400 uppercase mb-1">Detalhe do Problema Encontrado</span>
+                <p class="text-slate-700 bg-slate-50 p-3 rounded-lg border border-slate-200 leading-relaxed">{{ occurrenceModal.item.detalhe || 'Sem detalhes informados.' }}</p>
+             </div>
+          </div>
+          <div class="p-4 bg-slate-50 border-t border-slate-200 text-center">
+             <button @click="closeOccurrenceModal" class="px-6 py-2 bg-white border border-slate-300 text-slate-600 rounded-lg hover:bg-slate-100 font-bold text-sm transition-colors">Fechar</button>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <!-- GENERAL MODAL -->
+    <transition name="fade">
+      <div v-if="modal.show" class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+        <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-slide-up border border-slate-100 transform transition-all scale-100">
+          <div class="flex items-center gap-4 mb-4">
+            <div class="w-12 h-12 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center flex-shrink-0 text-xl border border-amber-100"><i class="fa-solid fa-triangle-exclamation"></i></div>
+            <h3 class="text-lg font-bold text-slate-800">{{ modal.title }}</h3>
+          </div>
+          <p class="text-slate-500 text-sm mb-6 leading-relaxed">{{ modal.message }}</p>
+          <div class="flex justify-end gap-3">
+            <button @click="closeModal" class="px-4 py-2 rounded-lg text-slate-500 font-bold text-sm hover:bg-slate-50 transition-colors">Cancelar</button>
+            <button @click="confirmModal" class="px-6 py-2 rounded-lg bg-brand-600 text-white font-bold text-sm hover:bg-brand-700 shadow-lg shadow-brand-200/50 transition-all transform active:scale-95">Confirmar</button>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <!-- SIDEBAR -->
+    <aside v-if="!focusMode" class="w-20 lg:w-64 bg-kabumblue-900 text-white flex flex-col justify-between transition-all duration-300 shadow-xl z-20 flex-shrink-0">
+      <div>
+        <div class="h-20 flex items-center justify-center lg:justify-start lg:px-6 border-b border-white/10 bg-kabumblue-900">
+          <div class="w-9 h-9 bg-brand-600 rounded-lg flex items-center justify-center text-white shadow-lg shadow-brand-600/30"><i class="fa-solid fa-bolt"></i></div>
+          <span class="ml-3 font-extrabold text-xl hidden lg:block tracking-tight text-white">Auditor<span class="text-brand-500">Pro</span></span>
+        </div>
+        <nav class="mt-8 px-3 space-y-2">
+          <a href="#" @click.prevent="currentView = 'upload'" :class="navClass('upload')" class="group flex items-center px-3 py-3 rounded-xl transition-all duration-200">
+            <i class="fa-solid fa-cloud-arrow-up text-lg w-6 text-center group-hover:scale-110 transition-transform"></i><span class="ml-3 font-semibold hidden lg:block text-sm">Upload</span>
+          </a>
+          <a href="#" @click.prevent="currentView = 'dashboard'" :class="navClass('dashboard')" class="group flex items-center px-3 py-3 rounded-xl transition-all duration-200">
+            <i class="fa-solid fa-chart-pie text-lg w-6 text-center group-hover:scale-110 transition-transform"></i><span class="ml-3 font-semibold hidden lg:block text-sm">Dashboard</span>
+          </a>
+          <a href="#" @click.prevent="currentView = 'historico'; carregarHistorico()" :class="navClass('historico')" class="group flex items-center px-3 py-3 rounded-xl transition-all duration-200">
+            <i class="fa-solid fa-clock-rotate-left text-lg w-6 text-center group-hover:scale-110 transition-transform"></i><span class="ml-3 font-semibold hidden lg:block text-sm">Histórico</span>
+          </a>
+        </nav>
+      </div>
+      <div class="p-4">
+        <div class="bg-kabumblue-800 rounded-xl p-3 border border-white/5 shadow-inner">
+          <div class="flex items-center gap-3 mb-1.5">
+            <div class="w-2 h-2 rounded-full" :class="loading ? 'bg-amber-400 animate-pulse' : 'bg-brand-500 shadow-[0_0_8px_rgba(234,88,12,0.6)]'"></div>
+            <span class="text-[10px] font-bold text-white/50 uppercase tracking-wider">Status</span>
+          </div>
+          <p class="text-xs text-white font-medium truncate pl-5">{{ statusMessage }}</p>
+          <p class="text-[9px] text-white/40 mt-1 pl-5">IA: {{ (knowledgeBase || []).length }} padrões</p>
+        </div>
+      </div>
+    </aside>
+
+    <!-- CONTENT -->
+    <main class="flex-1 flex flex-col h-full overflow-hidden relative bg-slate-50">
+      <header class="h-20 glass flex items-center justify-between px-8 z-10 sticky top-0">
+        <div>
+          <h2 class="text-2xl font-extrabold text-kabumblue-900 tracking-tight">{{ viewTitle }}</h2>
+          <p class="text-xs text-slate-500 font-medium mt-1" v-if="(sessionData || []).length > 0">
+            <i class="fa-solid fa-layer-group text-brand-600 mr-1"></i> Ativo: <span class="font-mono font-bold text-slate-700">{{ (filteredData || []).length }}</span> máquinas
+          </p>
+        </div>
+        <div class="flex items-center gap-3">
+          <!-- MINI UPLOAD BUTTON -->
+          <button v-if="(sessionData || []).length > 0" @click="$refs.fileInput.click()" class="w-10 h-10 rounded-full border border-brand-200 text-brand-600 hover:bg-brand-50 hover:shadow-sm transition-all flex items-center justify-center bg-white" title="Novo Upload">
+            <i class="fa-solid fa-cloud-arrow-up"></i>
+          </button>
+          
+          <button @click="toggleFocusMode" class="w-10 h-10 rounded-full border border-slate-200 text-slate-400 hover:bg-white hover:text-brand-600 hover:shadow-sm transition-all flex items-center justify-center bg-slate-50" :title="focusMode ? 'Sair foco' : 'Modo Foco'">
+            <i :class="focusMode ? 'fa-solid fa-compress' : 'fa-solid fa-expand'"></i>
+          </button>
+          <transition name="fade">
+            <div v-if="(sessionData || []).length > 0 && !loading" class="flex gap-2 ml-2">
+              <button @click="exportarPDF" class="h-9 px-4 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-all text-xs font-bold flex items-center gap-2 group shadow-sm"><i class="fa-solid fa-file-pdf text-lg"></i></button>
+              <button @click="exportarCSV" class="h-9 px-4 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-emerald-50 hover:text-emerald-600 hover:border-emerald-200 transition-all text-xs font-bold flex items-center gap-2 group shadow-sm"><i class="fa-solid fa-file-csv text-lg"></i></button>
+              <button @click="iniciarSalvamento" :disabled="loading" class="h-9 px-6 rounded-xl bg-brand-600 hover:bg-brand-700 text-white shadow-lg shadow-brand-500/20 transition-all text-sm font-bold flex items-center gap-2 transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none ml-2">
+                <i v-if="loading" class="fa-solid fa-circle-notch fa-spin"></i><i v-else class="fa-solid fa-floppy-disk"></i><span>Salvar</span>
+              </button>
+            </div>
+          </transition>
+        </div>
+      </header>
+
+      <div class="flex-1 overflow-y-auto p-4 lg:p-8 scroll-smooth bg-slate-50">
+        <transition name="fade" mode="out-in">
+          <!-- UPLOAD VIEW -->
+          <div v-if="currentView === 'upload' && (sessionData || []).length === 0" key="upload" class="max-w-4xl mx-auto mt-12">
+            <div class="bg-white p-12 rounded-3xl border border-slate-200 text-center shadow-xl shadow-slate-200/50">
+                <div class="w-20 h-20 bg-brand-50 text-brand-600 rounded-3xl flex items-center justify-center mx-auto mb-6 text-3xl shadow-sm ring-8 ring-brand-50/50"><i class="fa-solid fa-cloud-arrow-up"></i></div>
+                <h3 class="text-3xl font-bold text-slate-800 tracking-tight">Nova Análise</h3>
+                <p class="text-slate-500 mt-3 mb-10 max-w-lg mx-auto leading-relaxed text-sm">Arraste seu arquivo <b>.xlsx</b> ou <b>.csv</b>. <br>Filtro automático: <span class="bg-brand-50 px-2 py-0.5 rounded text-brand-700 font-mono text-xs font-bold border border-brand-100">Quarentena = Sim</span>.</p>
+                <div class="border-2 border-dashed border-slate-300 rounded-2xl p-12 transition-all duration-300 group cursor-pointer relative hover:border-brand-500 hover:bg-brand-50/30 bg-slate-50/30" :class="{ 'drag-active': isDragging }" @click="$refs.fileInput.click()" @dragover.prevent="isDragging = true" @dragleave.prevent="isDragging = false" @drop.prevent="handleDrop">
+                    <input type="file" ref="fileInput" @change="handleFileUpload" accept=".csv, .xlsx, .xls" class="hidden">
+                    <div class="flex flex-col items-center justify-center gap-4 pointer-events-none">
+                        <div v-if="!loading" class="w-14 h-14 rounded-full bg-white shadow-sm flex items-center justify-center text-slate-400 group-hover:text-brand-600 transition-colors border border-slate-200 group-hover:scale-110 duration-300 group-hover:shadow-md"><i class="fa-solid fa-plus text-2xl"></i></div>
+                        <div v-else class="w-14 h-14 flex items-center justify-center"><i class="fa-solid fa-circle-notch fa-spin text-3xl text-brand-600"></i></div>
+                        <div v-if="!loading" class="text-center"><p class="text-lg font-bold text-slate-700 group-hover:text-brand-700 transition-colors">Selecionar Arquivo</p><p class="text-sm text-slate-400 mt-1">ou solte o arquivo aqui</p></div>
+                        <div v-else class="text-center"><p class="text-lg font-bold text-slate-700">Processando...</p><p class="text-sm text-slate-400 mt-1">Isso pode levar alguns segundos</p></div>
+                    </div>
+                </div>
+            </div>
+          </div>
+
+          <!-- DASHBOARD VIEW -->
+          <div v-else-if="currentView === 'dashboard'" key="dashboard" class="space-y-8 max-w-6xl mx-auto">
+            <div class="bg-white p-8 rounded-3xl border border-slate-200 shadow-sm">
+              <div class="flex items-center gap-4 mb-8">
+                <div class="w-12 h-12 bg-kabumblue-900 text-white rounded-2xl flex items-center justify-center text-xl shadow-md shadow-kabumblue-900/20"><i class="fa-regular fa-calendar-check"></i></div>
+                <div><h3 class="text-xl font-bold text-slate-800">Consulta Histórica</h3><p class="text-sm text-slate-500">Dados oficiais da base de Divergência.</p></div>
+              </div>
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-6 items-end">
+                <div class="space-y-2"><label class="text-xs font-bold text-slate-500 uppercase ml-1 tracking-wider">Início</label><input type="date" v-model="filters.start" class="w-full bg-slate-50 border border-slate-200 text-slate-700 rounded-xl px-4 py-3 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all text-sm font-medium"></div>
+                <div class="space-y-2"><label class="text-xs font-bold text-slate-500 uppercase ml-1 tracking-wider">Fim</label><input type="date" v-model="filters.end" class="w-full bg-slate-50 border border-slate-200 text-slate-700 rounded-xl px-4 py-3 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all text-sm font-medium"></div>
+                <div class="flex gap-3">
+                  <button @click="setMonth" class="flex-1 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 font-bold py-3 px-4 rounded-xl text-xs transition-all uppercase tracking-wide">Mês Atual</button>
+                  <button @click="fetchByPeriod" :disabled="loading" class="flex-1 bg-brand-600 hover:bg-brand-700 text-white font-bold py-3 px-4 rounded-xl shadow-lg shadow-brand-900/20 transition-all flex items-center justify-center gap-2 disabled:opacity-70 disabled:shadow-none uppercase tracking-wide text-xs"><i v-if="loading" class="fa-solid fa-circle-notch fa-spin"></i><span v-else>BUSCAR DADOS</span></button>
+                </div>
+              </div>
+            </div>
+            <div v-if="(sessionData || []).length > 0" class="grid grid-cols-1 md:grid-cols-2 gap-6 animate-slide-up">
+                <div class="bg-white p-8 rounded-3xl border border-slate-200 shadow-sm">
+                    <h4 class="font-bold text-slate-800 mb-6 text-sm uppercase tracking-wider flex items-center gap-2"><i class="fa-solid fa-sack-dollar text-brand-600"></i> Distribuição Financeira</h4>
+                    <div class="h-64 flex justify-center"><canvas id="costChart"></canvas></div>
+                </div>
+                <div class="bg-white p-8 rounded-3xl border border-slate-200 shadow-sm">
+                    <h4 class="font-bold text-slate-800 mb-6 text-sm uppercase tracking-wider flex items-center gap-2"><i class="fa-solid fa-chart-pie text-brand-600"></i> Status das OSs</h4>
+                    <div class="h-64 flex justify-center"><canvas id="statusChart"></canvas></div>
+                </div>
+            </div>
+          </div>
+
+          <!-- HISTÓRICO VIEW -->
+          <div v-else-if="currentView === 'historico'" key="historico" class="max-w-6xl mx-auto">
+            <div class="flex justify-between items-center mb-8">
+              <h3 class="text-2xl font-bold text-slate-800">Sessões Anteriores</h3>
+              <button @click="carregarHistorico" class="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 rounded-xl text-sm font-bold text-slate-600 transition-all shadow-sm flex items-center gap-2"><i class="fa-solid fa-rotate" :class="{'fa-spin': historyLoading}"></i> Atualizar</button>
+            </div>
+            <div v-if="historyLoading" class="text-center py-20"><i class="fa-solid fa-circle-notch fa-spin text-3xl text-brand-600 mb-4"></i><p class="text-slate-500 font-medium">Buscando histórico...</p></div>
+            <div v-else-if="(historyList || []).length === 0" class="text-center py-20 bg-white rounded-3xl border border-dashed border-slate-200"><p class="text-slate-400 font-medium">Nenhum histórico encontrado.</p></div>
+            <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+              <div v-for="item in historyList" :key="item" @click="loadSession(item)" class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm hover:shadow-xl hover:border-brand-200 hover:-translate-y-1 transition-all duration-300 cursor-pointer group relative overflow-hidden">
+                <div class="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-slate-50 to-brand-50 -mr-8 -mt-8 rounded-full z-0 group-hover:scale-150 transition-transform duration-500"></div>
+                <div class="flex items-center justify-between mb-4 relative z-10">
+                  <div class="w-10 h-10 rounded-xl bg-brand-50 text-brand-600 flex items-center justify-center group-hover:bg-brand-600 group-hover:text-white transition-colors border border-brand-100"><i class="fa-regular fa-folder-open"></i></div>
+                  <i class="fa-solid fa-arrow-right text-slate-300 group-hover:text-brand-500 group-hover:translate-x-1 transition-all"></i>
+                </div>
+                <h4 class="font-bold text-slate-800 text-sm truncate relative z-10">{{ item }}</h4>
+                <p class="text-xs text-slate-400 mt-1 font-medium relative z-10">Clique para abrir</p>
+              </div>
+            </div>
+          </div>
+        </transition>
+
+        <!-- DATA VIEW -->
+        <div v-if="(sessionData || []).length > 0 && !loading" class="space-y-6 animate-slide-up pb-20 mt-8">
+          
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden group"><p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest relative z-10">Custo Total</p><h3 class="text-2xl font-extrabold text-slate-800 mt-1 relative z-10 tracking-tight">{{ formatMoney(stats.totalCost) }}</h3><div class="w-1.5 h-full bg-slate-200 absolute left-0 top-0"></div></div>
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden"><p class="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">Aprovado para Pagamento</p><h3 class="text-2xl font-extrabold text-emerald-700 mt-1">{{ stats.approvedCount }} <span class="text-xs font-medium text-slate-400">unid.</span></h3><div class="w-1.5 h-full bg-emerald-500 absolute left-0 top-0"></div></div>
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden"><p class="text-[10px] font-bold text-amber-600 uppercase tracking-widest">Avariados</p><h3 class="text-2xl font-extrabold text-amber-700 mt-1">{{ stats.partnerCount }} <span class="text-xs font-medium text-slate-400">unid.</span></h3><div class="w-1.5 h-full bg-amber-500 absolute left-0 top-0"></div></div>
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden"><p class="text-[10px] font-bold text-rose-600 uppercase tracking-widest">Reprovado para Pagamento</p><h3 class="text-2xl font-extrabold text-rose-700 mt-1">{{ stats.rejectedCount }} <span class="text-xs font-medium text-slate-400">unid.</span></h3><div class="w-1.5 h-full bg-rose-500 absolute left-0 top-0"></div></div>
+          </div>
+
+          <div class="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm sticky top-0 z-20 flex flex-wrap items-center justify-between gap-4">
+            <div class="flex items-center gap-3 flex-1 min-w-[300px]">
+              <div class="relative group flex-1 max-w-sm"><i class="fa-solid fa-search absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-brand-600 transition-colors text-xs"></i><input type="text" v-model="searchQuery" placeholder="Filtrar por OS, Técnico..." class="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-brand-500 transition-all font-medium placeholder-slate-400 text-slate-700 outline-none"></div>
+              <div class="h-8 w-px bg-slate-200 mx-1 hidden md:block"></div>
+              <div class="flex gap-1 overflow-x-auto no-scrollbar">
+                <button v-for="f in availableFilters" :key="f.key" @click="activeFilter = f.key" :class="activeFilter === f.key ? 'bg-kabumblue-900 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'" class="px-3 py-1.5 rounded-lg text-xs transition-all whitespace-nowrap font-bold uppercase tracking-wide">{{ f.label }}</button>
+              </div>
+            </div>
+            <div class="flex items-center gap-4 px-2">
+              <div class="text-right hidden sm:block"><p class="text-[10px] font-bold text-slate-400 uppercase">Processados</p><p class="text-sm font-bold text-slate-700">{{ completedCount }} <span class="text-slate-300">/</span> {{ (sessionData || []).length }}</p></div>
+              <div class="w-32 h-2.5 bg-slate-100 rounded-full overflow-hidden border border-slate-200"><div class="h-full bg-brand-600 transition-all duration-500 ease-out shadow-[0_0_10px_rgba(234,88,12,0.4)]" :style="{ width: progressPercent + '%' }"></div></div>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+            <div class="overflow-x-auto max-h-[600px]">
+              <table class="w-full text-left border-collapse">
+                <thead class="bg-slate-50 border-b border-slate-200">
+                  <tr>
+                    <th class="px-4 py-4 w-12 text-center sticky top-0 bg-slate-50 z-20">
+                      <div class="checkbox-wrapper relative flex items-center justify-center cursor-pointer" @click="toggleSelectAll">
+                        <input type="checkbox" :checked="isAllSelected" class="peer appearance-none w-5 h-5 border-2 border-slate-300 rounded-md bg-white checked:bg-brand-600 checked:border-brand-600 transition-all cursor-pointer shadow-sm">
+                        <i class="fa-solid fa-check text-white text-xs absolute pointer-events-none opacity-0 peer-checked:opacity-100 transition-opacity"></i>
+                      </div>
+                    </th>
+                    <th class="px-4 py-4 text-[10px] font-extrabold text-slate-500 uppercase tracking-widest sticky top-0 bg-slate-50 z-10">Máquina</th>
+                    <th class="px-4 py-4 text-[10px] font-extrabold text-slate-500 uppercase tracking-widest sticky top-0 bg-slate-50 z-10 w-1/3">Diagnóstico</th>
+                    <th class="px-4 py-4 text-[10px] font-extrabold text-slate-500 uppercase tracking-widest sticky top-0 bg-slate-50 z-10 text-center">Avaria Cust.</th>
+                    <th class="px-4 py-4 text-[10px] font-extrabold text-slate-500 uppercase tracking-widest sticky top-0 bg-slate-50 z-10">Valores</th>
+                    <th class="px-4 py-4 text-[10px] font-extrabold text-slate-500 uppercase tracking-widest sticky top-0 bg-slate-50 z-10 text-center">Ação</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100 text-xs text-slate-600">
+                  <tr v-for="(item, index) in filteredData" :key="item.OS" @mouseenter="hoveredItem = item.OS" @mouseleave="hoveredItem = null" :class="[getRowClass(item), isSelected(item) ? 'bg-brand-50 border-l-brand-600' : '']" class="group transition-colors duration-150">
+                    <td class="px-4 py-5 text-center bg-transparent">
+                      <div class="checkbox-wrapper relative flex items-center justify-center cursor-pointer" @click.stop="toggleSelect(item)">
+                        <input type="checkbox" :checked="isSelected(item)" class="peer appearance-none w-5 h-5 border-2 border-slate-300 rounded-md bg-white checked:bg-brand-600 checked:border-brand-600 transition-all cursor-pointer">
+                        <i class="fa-solid fa-check text-white text-xs absolute pointer-events-none opacity-0 peer-checked:opacity-100"></i>
+                      </div>
+                    </td>
+                    <td class="px-4 py-5 align-top">
+                      <div class="flex flex-col gap-2">
+                        <div class="flex items-center gap-2">
+                          <span class="font-bold text-slate-800 text-sm font-mono bg-slate-100 px-2 py-0.5 rounded border border-slate-200">{{ item.OS || item['NÚMERO OS'] }}</span>
+                          <span v-if="item._isDup" class="bg-amber-100 text-amber-700 text-[9px] px-1.5 py-0.5 rounded-md font-bold border border-amber-200">x{{ item._dupCount }}</span>
+                          <div v-if="(item._photos || []).length > 0" class="flex gap-1"><a v-for="(pic, pIdx) in item._photos" :key="pIdx" :href="pic" target="_blank" class="text-brand-600 hover:text-brand-800 transition-colors" title="Ver foto"><i class="fa-solid fa-camera"></i></a></div>
+                        </div>
+                        <div class="flex items-center gap-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-wide truncate max-w-[160px]" :title="item['NOME DO TÉCNICO']"><i class="fa-solid fa-user-gear"></i> {{ item['NOME DO TÉCNICO'] || 'N/A' }}</div>
+                      </div>
+                    </td>
+                    <td class="px-4 py-5 align-top">
+                      <div v-if="item['QUAL PROBLEMA?'] === 'DADOS NÃO LOCALIZADOS'" class="p-3 bg-rose-50 rounded-xl border border-rose-100 text-rose-600 italic text-xs">
+                        <div class="font-bold mb-1 flex items-center gap-2 text-rose-700"><i class="fa-solid fa-circle-exclamation"></i> OS NÃO LOCALIZADA</div>{{ item['DETALHE O PROBLEMA ENCONTRADO'] }}
+                      </div>
+                      <div v-else class="space-y-4">
+                        <div v-for="(sub, sIdx) in (item._subRecords || [])" :key="sub.id" @click="openOccurrenceDetails(sub)" class="relative pl-3 border-l-2 border-slate-200 hover:border-brand-300 transition-colors cursor-pointer p-2 rounded-r-lg group/sub">
+                          <div class="flex justify-between items-baseline mb-1"><span class="text-[9px] font-bold text-slate-400 uppercase tracking-wider group-hover/sub:text-brand-600">Ocorrência #{{ sIdx + 1 }}</span><i class="fa-solid fa-up-right-from-square text-[10px] text-slate-300 group-hover/sub:text-brand-500"></i></div>
+                          <div class="font-bold text-xs text-slate-700">{{ sub.problema || '-' }}</div>
+                          <div class="text-slate-500 leading-relaxed mt-1" :title="sub.detalhe">{{ sub.detalhe || 'Sem detalhes.' }}</div>
+                        </div>
+                        <div v-if="item._sugestao" class="flex items-center gap-2 mt-2 pt-2 border-t border-dashed border-slate-200">
+                           <i class="fa-solid fa-wand-magic-sparkles text-brand-400 text-xs"></i>
+                           <span class="text-[10px] font-bold uppercase text-slate-400">Sugestão:</span>
+                           <span class="text-[10px] font-bold px-2 py-0.5 rounded border" :class="getBadgeStyle(item._sugestao)">{{ formatStatus(item._sugestao) }}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td class="px-4 py-5 text-center align-top">
+                       <div class="flex flex-col gap-2">
+                           <div v-for="(sub, idx) in (item._subRecords || [])" :key="idx" class="text-xs font-bold text-slate-600 bg-slate-100 px-2 py-1 rounded border border-slate-200">{{ sub.avariaCust || '-' }}</div>
+                       </div>
+                    </td>
+                    <td class="px-4 py-5 align-top">
+                      <div @click="openCfDetails(item)" class="bg-slate-50 p-3 rounded-xl border border-slate-200 text-xs w-full min-w-[160px] group-hover:border-brand-300 group-hover:shadow-sm transition-all cursor-pointer relative hover:bg-brand-50/50" title="Ver detalhes de peças e links">
+                        <div class="absolute top-1 right-2 text-brand-400 opacity-0 group-hover:opacity-100 transition-opacity"><i class="fa-solid fa-up-right-from-square text-[10px]"></i></div>
+                        <div class="flex justify-between text-slate-500 mb-1"><span>Peça Antiga:</span> <span class="font-mono text-slate-700">{{ formatMoney(item._custoAntigo) }}</span></div>
+                        <div class="flex justify-between text-slate-500 pb-2 border-b border-slate-200 mb-2"><span>Peça Nova:</span> <span class="font-mono text-slate-700">{{ formatMoney(item._custoNovo) }}</span></div>
+                        <div class="flex justify-between font-bold text-slate-800 items-center"><span>TOTAL</span> <span class="text-sm bg-white px-2 py-0.5 rounded border border-slate-200 text-brand-700">{{ formatMoney(item._custoTotal) }}</span></div>
+                      </div>
+                    </td>
+                    <td class="px-4 py-5 text-center align-top">
+                      <div class="flex justify-center gap-2">
+                        <button @click="decidir(item, 'ok_pagamento')" :class="getBtnClass(item._status, 'ok_pagamento', 'emerald')" class="w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 border shadow-sm hover:scale-110 active:scale-95 bg-white border-slate-200" title="Aprovar (Tecla 1)"><i class="fa-solid fa-check text-sm"></i></button>
+                        <button @click="decidir(item, 'avaria_parceiro')" :class="getBtnClass(item._status, 'avaria_parceiro', 'amber')" class="w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 border shadow-sm hover:scale-110 active:scale-95 bg-white border-slate-200" title="Parceiro (Tecla 2)"><i class="fa-solid fa-triangle-exclamation text-sm"></i></button>
+                        <button @click="decidir(item, 'nao_pagar')" :class="getBtnClass(item._status, 'nao_pagar', 'rose')" class="w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 border shadow-sm hover:scale-110 active:scale-95 bg-white border-slate-200" title="Reprovar (Tecla 3)"><i class="fa-solid fa-xmark text-sm"></i></button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-if="(filteredData || []).length === 0" class="py-20 text-center">
+                <div class="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4 border border-slate-200 text-slate-400"><i class="fa-solid fa-magnifying-glass text-2xl"></i></div>
+                <p class="text-slate-500 font-medium">Nenhum registro encontrado.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- INCLUSÃO JS -->
+  <?!= include('JavaScript'); ?>
+
+</body>
+</html>
