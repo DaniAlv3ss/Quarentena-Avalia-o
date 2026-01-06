@@ -407,10 +407,13 @@
           const r0 = records[0];
           
           // CONTEXTO DE REGRAS (PESOS)
-          // Pega dados do primeiro registro para aplicar as regras
+          // Agrega valores de todos os registros da OS para garantir que se houver um SIM, ele seja capturado
+          const allAvaria = records.map(r => r['_idx_avaria_cust'] || '').join(' ');
+          const allProcesso = records.map(r => r['_idx_processo'] || '').join(' ');
+          
           const context = {
-            avariaCust: r0['_idx_avaria_cust'],
-            processo: r0['_idx_processo']
+            avariaCust: allAvaria,
+            processo: allProcesso
           };
 
           // PREDIÇÃO HÍBRIDA
