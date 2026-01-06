@@ -9,7 +9,10 @@ const CONFIG = {
   NOME_ABA_DADOS: 'Divergência',
   ID_PLANILHA_CUSTOS: '1CEexqCPUyP5b4Qra1tt5qWyBIUW0lfIoYIEvYgBFhtA', // Base de CFs
   NOME_ABA_CUSTOS: 'Base de CFs',
-  NOME_ABA_HISTORICO: 'Histórico de Auditorias'
+  NOME_ABA_HISTORICO: 'Histórico de Auditorias',
+  // NOVA PLANILHA DE TREINAMENTO (Sua base histórica)
+  ID_PLANILHA_TREINO: '1tUjt4G45BrRUxn-peLBVR7l6w7td6nDf8rD5hvoDGi8',
+  NOME_ABA_TREINO: 'Trei_Hist'
 };
 
 function doGet() {
@@ -48,13 +51,59 @@ function buscarDadosPorPeriodo(ini, fim) {
   const dtFim = new Date(fim + 'T23:59:59');
 
   const resultado = dados.filter(row => {
-    // Tenta ler do índice fixo ou do nome da coluna
     const valData = row['_idx_data'] || row['CARIMBO DE DATA/HORA']; 
     const dataRow = converterDataPtBr(valData);
     return dataRow && dataRow >= dtIni && dataRow <= dtFim;
   });
 
   return enriquecerComCustos(resultado, dadosProdutos);
+}
+
+// --- INTEGRAÇÃO COM IA E HISTÓRICO ---
+
+function carregarHistoricoTreinamento() {
+  try {
+    const ss = SpreadsheetApp.openById(CONFIG.ID_PLANILHA_TREINO);
+    const aba = ss.getSheetByName(CONFIG.NOME_ABA_TREINO);
+    if (!aba) return [];
+
+    const dados = aba.getDataRange().getDisplayValues();
+    if (dados.length < 2) return [];
+
+    // Mapeamento das colunas da sua planilha Trei_Hist
+    // A: OS, B: Data, C: Avaria Customiza, D: Processo, E: Motivos, F: Detalhe, G: Considerações (Decisão)
+    const dataset = [];
+    
+    // Normalizador de labels (Humanos -> Código do Sistema)
+    const mapLabel = (txt) => {
+      const t = String(txt).toLowerCase().trim();
+      if (t.includes('reprovado') || t.includes('não pagar')) return 'nao_pagar';
+      if (t.includes('aprovado') || t.includes('pagar') || t.includes('ok')) return 'ok_pagamento';
+      if (t.includes('parceiro') || t.includes('avaria')) return 'avaria_parceiro';
+      return null;
+    };
+
+    for (let i = 1; i < dados.length; i++) {
+      const row = dados[i];
+      const motivo = row[4]; // Coluna E
+      const detalhe = row[5]; // Coluna F
+      const decisaoRaw = row[6]; // Coluna G (Considerações)
+      
+      const textoCompleto = `${motivo} ${detalhe}`.trim();
+      const label = mapLabel(decisaoRaw);
+
+      if (textoCompleto.length > 3 && label) {
+        dataset.push({
+          texto: textoCompleto,
+          categoria: label
+        });
+      }
+    }
+    return dataset;
+  } catch (e) {
+    console.error("Erro ao carregar treino: " + e);
+    return [];
+  }
 }
 
 // --- PERSISTÊNCIA E HISTÓRICO ---
@@ -85,10 +134,6 @@ function carregarSessaoAntiga(idSessao) {
   for (let i = 1; i < dados.length; i++) {
     if (dados[i][idColIndex] === idSessao) {
       const r = dados[i];
-      // Reconstrói o objeto com os campos que salvamos
-      // Nota: Ao carregar histórico, alguns campos detalhados do modal original podem não existir se não foram salvos na aba histórica.
-      // O histórico salva o "resumo". Se precisar dos detalhes originais ao recarregar, teríamos que salvar mais colunas.
-      // Por enquanto, mantemos a estrutura de visualização.
       resultado.push({
         OS: r[0],
         'NOME DO TÉCNICO': r[1],
@@ -169,26 +214,23 @@ function salvarSessaoNaPlanilha(nomeSessao, dados, isUpdate) {
   return { success: true, nomeAba: nomeSessao };
 }
 
-// --- APRENDIZADO DE MÁQUINA ---
-
-function buscarBaseConhecimento() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const aba = ss.getSheetByName('Treinamento');
-  if (!aba) return [];
-  const dados = aba.getDataRange().getValues();
-  if (dados.length < 2) return [];
-  return dados.slice(1).map(r => ({ padrao: r[0], decisao: r[1] }));
-}
-
+// Mantido para compatibilidade, mas não usado pelo novo modelo Bayesiano
 function salvarAprendizado(texto, decisao) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let aba = ss.getSheetByName('Treinamento');
-  if (!aba) {
-    aba = ss.insertSheet('Treinamento');
-    aba.appendRow(["Texto Padrão", "Decisão", "Data"]);
-  }
-  aba.appendRow([texto, decisao, new Date()]);
-  return { success: true };
+  // Implementação opcional: você pode querer salvar novos casos na planilha de treino para ela crescer
+  try {
+    const ss = SpreadsheetApp.openById(CONFIG.ID_PLANILHA_TREINO);
+    const aba = ss.getSheetByName(CONFIG.NOME_ABA_TREINO);
+    if(aba) {
+      // Adiciona no final simulando a estrutura: OS(vazia), Data, Avaria(vazia), Processo(vazia), Motivo(texto), Detalhe(vazia), Considerações(decisão)
+      // Ajustando labels inversos para salvar legível
+      let labelHumano = 'Em Análise';
+      if(decisao === 'ok_pagamento') labelHumano = 'Aprovado Pagamento';
+      if(decisao === 'nao_pagar') labelHumano = 'Reprovado Pagamento';
+      if(decisao === 'avaria_parceiro') labelHumano = 'Avaria Parceiro';
+      
+      aba.appendRow(['AUTO', new Date(), '-', '-', texto, '-', labelHumano, 0]);
+    }
+  } catch(e) {}
 }
 
 // --- HELPERS (LEITURA CRÍTICA) ---
@@ -203,41 +245,31 @@ function buscarDadosDivergencia() {
     const lc = aba.getLastColumn();
     if (lr < 2) return [];
     
-    // Pega todos os dados a partir da linha 2
     const range = aba.getRange(2, 1, lr - 1, lc);
     const values = range.getDisplayValues();
     
-    // Mapeamento dinâmico (nomes) + Mapeamento fixo (índices solicitados)
     const headers = values[0].map(h => String(h).trim().toUpperCase());
     
     return values.slice(1).map(r => {
       let obj = {};
-      
-      // 1. Mapeia por nome do cabeçalho (padrão antigo)
       headers.forEach((h, i) => obj[h] = r[i]);
 
-      // 2. Mapeia por ÍNDICE FIXO (Segurança Máxima conforme solicitado)
-      // Índices fornecidos (0-based da linha da planilha):
-      // Coluna A = 0.
-      obj['_idx_data'] = r[0];         // Carimbo data/hora
-      obj['_idx_tecnico'] = r[1];      // Nome Técnico
-      obj['_idx_processo'] = r[2];     // Processo?
-      obj['_idx_problema'] = r[3];     // Qual Problema?
-      obj['_idx_detalhe'] = r[4];      // Detalhe o problema
-      obj['_idx_os'] = r[5];           // OS
-      obj['_idx_inicio'] = r[6];       // Inicio tratativa
-      obj['_idx_fim'] = r[7];          // Fim tratativa
-      obj['_idx_pedido'] = r[8];       // Pedido
-      obj['_idx_prod_div'] = r[9];     // Produto Divergente
-      obj['_idx_tipo_troca'] = r[10];  // Tipo de Troca?
-      obj['_idx_avaria_cust'] = r[11]; // Avaria customiza?
+      obj['_idx_data'] = r[0];         
+      obj['_idx_tecnico'] = r[1];      
+      obj['_idx_processo'] = r[2];     
+      obj['_idx_problema'] = r[3];     
+      obj['_idx_detalhe'] = r[4];      
+      obj['_idx_os'] = r[5];           
+      obj['_idx_inicio'] = r[6];       
+      obj['_idx_fim'] = r[7];          
+      obj['_idx_pedido'] = r[8];       
+      obj['_idx_prod_div'] = r[9];     
+      obj['_idx_tipo_troca'] = r[10];  
+      obj['_idx_avaria_cust'] = r[11]; 
       
-      // Colunas extras úteis
-      // Acha coluna de foto pelo nome aproximado caso mude de lugar
       const idxFoto = headers.findIndex(h => h.includes('FOTO'));
       if(idxFoto > -1) obj['FOTO DA AVARIA!'] = r[idxFoto];
 
-      // Acha colunas de CF
       const idxCFAnt = headers.findIndex(h => h.includes('CF PRODUTO ANTIGO'));
       const idxCFNov = headers.findIndex(h => h.includes('CF PRODUTO NOVO'));
       if(idxCFAnt > -1) obj['CF PRODUTO ANTIGO'] = r[idxCFAnt];
@@ -292,7 +324,6 @@ function enriquecerComCustos(dados, dadosProdutos) {
 }
 
 function normalizarOS(row) {
-  // Prioriza o índice fixo se existir
   if (row['_idx_os']) return String(row['_idx_os']).trim().toUpperCase();
   return String(row['OS'] || row['NÚMERO OS'] || row['ID'] || '').trim().toUpperCase();
 }
