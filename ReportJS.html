@@ -1,0 +1,72 @@
+<script>
+const ReportService = {
+  config: { taxaMontagem: 189.90, moeda: { style: 'currency', currency: 'BRL' } },
+  _fmt(val) { return (val || 0).toLocaleString('pt-BR', this.config.moeda); },
+
+  exportarCSV(dados) {
+    if (!dados || dados.length === 0) { alert("Nada para exportar."); return; }
+    let csvContent = "data:text/csv;charset=utf-8,ID,OS,Tecnico,Problema,Detalhe,Custo Pecas,Status\n";
+    dados.forEach((row, i) => {
+      const subs = row._subRecords || [];
+      const probs = subs.length > 0 ? subs.map(s => `[${s.id}] ${s.problema}: ${s.detalhe}`).join(" | ") : (row['QUAL PROBLEMA?'] || '');
+      const cols = [ i + 1, row.OS || row['NÚMERO OS'], row['NOME DO TÉCNICO'], row['QUAL PROBLEMA?'], probs, row._custoTotal, row._status ];
+      const rowStr = cols.map(c => `"${String(c || '').replace(/"/g, '""')}"`).join(",");
+      csvContent += rowStr + "\r\n";
+    });
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `auditoria_avarias_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link); link.click(); document.body.removeChild(link);
+  },
+
+  exportarPDF(dados, stats) {
+    if (!dados || dados.length === 0) { alert("Nada para exportar."); return; }
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    const today = new Date().toLocaleDateString();
+
+    doc.setFillColor(234, 88, 12); doc.rect(0, 0, 210, 24, 'F');
+    doc.setTextColor(255, 255, 255); doc.setFontSize(18); doc.setFont("helvetica", "bold");
+    doc.text("Relatório de Auditoria Técnica", 14, 16);
+    doc.setFontSize(10); doc.setFont("helvetica", "normal"); doc.text(`Gerado em: ${today}`, 195, 16, { align: 'right' });
+
+    let y = 35; doc.setTextColor(40, 40, 40); doc.setFontSize(12); doc.setFont("helvetica", "bold"); doc.text("Resumo Executivo", 14, y);
+    y += 8; const startX = 14; const boxWidth = 45; const boxHeight = 22; const gap = 5;
+
+    const drawCard = (x, title, value, color) => {
+      doc.setDrawColor(220, 220, 220); doc.setFillColor(250, 250, 250); doc.roundedRect(x, y, boxWidth, boxHeight, 2, 2, 'FD');
+      doc.setFontSize(7); doc.setTextColor(150, 150, 150); doc.text(title.toUpperCase(), x + 3, y + 8);
+      doc.setFontSize(11); doc.setTextColor(color[0], color[1], color[2]); doc.text(value, x + 3, y + 18);
+    };
+
+    drawCard(startX, "Custo Total", this._fmt(stats.totalCost), [50, 50, 50]);
+    drawCard(startX + boxWidth + gap, "Aprovados", `${stats.approvedCount} un.`, [16, 185, 129]);
+    drawCard(startX + (boxWidth + gap) * 2, "Avariados", `${stats.partnerCount} un.`, [245, 158, 11]);
+    drawCard(startX + (boxWidth + gap) * 3, "Reprovados", `${stats.rejectedCount} un.`, [244, 63, 94]);
+
+    y += 35; doc.setFontSize(12); doc.setTextColor(40, 40, 40); doc.text("Detalhamento das Ordens de Serviço", 14, y);
+
+    const tableBody = dados.map((item, index) => {
+      let statusTxt = item._status;
+      if (statusTxt === 'ok_pagamento') statusTxt = 'PAGAR';
+      if (statusTxt === 'avaria_parceiro') statusTxt = 'PARCEIRO';
+      if (statusTxt === 'nao_pagar') statusTxt = 'REPROVADO';
+      return [index + 1, item.OS || item['NÚMERO OS'] || '-', (item['NOME DO TÉCNICO'] || '').substring(0, 20), (item._subRecords || []).length > 0 ? `${item._subRecords.length} ocorrências` : (item['QUAL PROBLEMA?'] || '').substring(0, 30), this._fmt(item._custoTotal), statusTxt];
+    });
+
+    doc.autoTable({
+      head: [['#', 'OS', 'Técnico', 'Diagnóstico', 'Custo Total', 'Decisão']], body: tableBody, startY: y + 5, theme: 'grid',
+      headStyles: { fillColor: [234, 88, 12], textColor: 255, fontStyle: 'bold' }, styles: { fontSize: 8, cellPadding: 3 },
+      didParseCell: function(data) {
+        if (data.section === 'body' && data.column.index === 5) {
+          if (data.cell.text[0] === 'PAGAR') data.cell.styles.textColor = [22, 163, 74];
+          if (data.cell.text[0] === 'PARCEIRO') data.cell.styles.textColor = [217, 119, 6];
+          if (data.cell.text[0] === 'REPROVADO') data.cell.styles.textColor = [220, 38, 38];
+        }
+      }
+    });
+    doc.save(`Relatorio_${new Date().toISOString().slice(0, 10)}.pdf`);
+  }
+};
+</script>
