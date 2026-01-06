@@ -2,7 +2,7 @@
   /**
    * SERVIÇO DE MACHINE LEARNING HÍBRIDO (Regras + Naive Bayes)
    * 1. Verifica regras determinísticas ("Pesos").
-   * 2. Se não houver regra, usa IA probabilística.
+   * 2. Se não houver regra, usa IA probabilística (com restrições de categoria).
    */
   window.MLService = {
     model: {
@@ -51,7 +51,8 @@
         console.log("ML Treinado com " + this.docCount + " exemplos.");
       },
       
-      classify(text) {
+      // Agora aceita uma lista de categorias proibidas
+      classify(text, forbiddenCategories = []) {
         if (!text || this.docCount === 0) return null;
         const tokens = this.tokenizer.tokenize(text);
         if (tokens.length === 0) return null;
@@ -60,6 +61,9 @@
         let maxProb = -Infinity;
         
         Object.keys(this.categories).forEach(catName => {
+          // Se a categoria estiver na lista de proibidas, pula a verificação
+          if (forbiddenCategories.includes(catName)) return;
+
           const catData = this.categories[catName];
           let logProb = Math.log(catData.docCount / this.docCount);
           
@@ -83,24 +87,33 @@
     train(data) { this.model.train(data); },
     
     predict(text, context) {
+        let forbidden = [];
+
         // --- LÓGICA DE PESOS / REGRAS DE NEGÓCIO ---
         if (context) {
             const avaria = (context.avariaCust || '').toString().trim().toLowerCase();
             const processo = (context.processo || '').toString().trim().toLowerCase();
 
-            // Peso 1: Avaria Customiza? -> Sim -> Parceiro
-            if (avaria === 'sim') {
+            // REGRA 1 (MANDATÓRIA): Se houver QUALQUER "sim" na string de avaria, É PARCEIRO.
+            // Isso cobre casos onde há múltiplos registros ("Não Sim Não") para a mesma OS.
+            if (avaria.includes('sim')) {
                 return 'avaria_parceiro';
             }
 
-            // Peso 2: Processo? -> Antes da montagem -> Reprovado
+            // REGRA 2: Se NÃO tem "sim", PROÍBE "Parceiro".
+            // Isso obriga a IA a escolher entre as outras opções (Pagar ou Reprovado).
+            if (!avaria.includes('sim')) {
+                forbidden.push('avaria_parceiro');
+            }
+
+            // REGRA 3: Processo anterior à montagem -> Reprovado
             if (processo.includes('antes')) {
                 return 'nao_pagar';
             }
         }
 
-        // Se não caiu nas regras, usa a IA Estatística
-        return this.model.classify(text); 
+        // Usa a IA Estatística passando a lista de categorias proibidas
+        return this.model.classify(text, forbidden);
     }
   };
 </script>
