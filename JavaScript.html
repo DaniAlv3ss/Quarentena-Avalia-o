@@ -1,0 +1,566 @@
+<script>
+  const { createApp, ref, computed, reactive, onMounted, onUnmounted, nextTick, watch, shallowRef, triggerRef } = Vue;
+
+  // --- CONFIG ---
+  const AppConfig = {
+    TAXA_MONTAGEM: 189.90,
+    KABUM_SEARCH_URL: 'https://www.kabum.com.br/busca/'
+  };
+
+  // --- ML SERVICE ---
+  const MLService = {
+    stopWords: new Set(['o','a','os','as','um','uma','de','do','da','em','no','na','por','pelo','pela','para','com','sem','e','ou','que','seu','sua','ao','aos','nao','sim']),
+    tokenize(text) {
+      if (!text) return [];
+      return text.toString().toLowerCase()
+        .replace(/[^\w\s\u00C0-\u00FF]/gi, ' ')
+        .split(/\s+/)
+        .filter(w => w.length > 2 && !this.stopWords.has(w));
+    },
+    predict(text, knowledgeBase) {
+      if (!text || !knowledgeBase || knowledgeBase.length === 0) return null;
+      const inputTokens = this.tokenize(text);
+      if (inputTokens.length === 0) return null;
+      const scores = { 'ok_pagamento': 0, 'avaria_parceiro': 0, 'nao_pagar': 0 };
+      
+      for (let i = 0; i < knowledgeBase.length; i++) {
+         const rule = knowledgeBase[i];
+         const ruleTokens = this.tokenize(rule.padrao);
+         if (ruleTokens.length === 0) continue;
+         let matches = 0;
+         for (let j = 0; j < inputTokens.length; j++) {
+           if (ruleTokens.includes(inputTokens[j])) matches++;
+         }
+         if (matches > 0) {
+           const weight = matches / (ruleTokens.length + 0.5);
+           if (scores[rule.decisao] !== undefined) scores[rule.decisao] += weight;
+         }
+      }
+      let maxScore = 0; let winner = null;
+      for (const cat in scores) {
+        if (scores[cat] > maxScore) { maxScore = scores[cat]; winner = cat; }
+      }
+      return maxScore >= 0.4 ? winner : null;
+    }
+  };
+
+  // --- MOCK SERVICE (Fallback local) ---
+  const mockService = {
+    buscarBaseConhecimento: () => Promise.resolve([{ padrao: 'tela trincada', decisao: 'avaria_parceiro' }]),
+    buscarDadosPorListaOS: (list) => new Promise(r => setTimeout(() => r(list.map(os => ({
+      OS: os, 'NOME DO TÉCNICO': 'Técnico Mock', 
+      'QUAL PROBLEMA?': 'Tela Defeito', 'DETALHE O PROBLEMA ENCONTRADO': 'Trincou',
+      '_idx_processo': 'Troca', 'FOTO DA AVARIA!': 'http://google.com',
+      'CF PRODUTO ANTIGO': '12345', 'CF PRODUTO NOVO': '67890',
+      _custoAntigo: 150.50, _custoNovo: 200.00, _custoTotal: 350.50
+    }))), 500)),
+    buscarDadosPorPeriodo: (i, f) => new Promise(r => setTimeout(() => r([]), 1000)),
+    listarSessoesSalvas: () => Promise.resolve(['Auditoria 01/05']),
+    carregarSessaoAntiga: (n) => Promise.resolve([]),
+    salvarSessaoNaPlanilha: (n) => new Promise(r => setTimeout(() => r({nomeAba: n}), 1000)),
+    salvarAprendizado: () => {}
+  };
+
+  const runGoogle = (fn, ...args) => {
+    if (typeof google !== 'undefined' && google.script) {
+      return new Promise((resolve, reject) => {
+        google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](...args);
+      });
+    } else { return mockService[fn](...args); }
+  };
+
+  createApp({
+    setup() {
+      const currentView = ref('upload');
+      const viewTitle = computed(() => {
+        if (currentView.value === 'upload') return 'Nova Auditoria';
+        if (currentView.value === 'dashboard') return 'Dashboard';
+        return 'Histórico';
+      });
+
+      // State
+      const loading = ref(false);
+      const statusMessage = ref('Pronto');
+      const sessionData = shallowRef([]); 
+      const knowledgeBase = ref([]);
+      const historyList = ref([]);
+      const historyLoading = ref(false);
+      const editingSessionName = ref(null);
+      const searchQuery = ref('');
+      const activeFilter = ref('todos');
+      const availableFilters = [
+          { key: 'todos', label: 'Todos' },
+          { key: 'pendente', label: 'Pendentes' },
+          { key: 'ok_pagamento', label: 'Aprovados' },
+          { key: 'avaria_parceiro', label: 'Avariados' },
+          { key: 'nao_pagar', label: 'Reprovados' }
+      ];
+      const filters = reactive({ start: '', end: '' });
+      const fileInput = ref(null);
+      
+      // UX State
+      const isDragging = ref(false);
+      const toasts = ref([]);
+      
+      // MODAL STATES (SIMPLIFICADOS)
+      const modal = reactive({ show: false, title: '', message: '', onConfirm: null });
+      const cfModal = reactive({ show: false, item: null });
+      const occurrenceModal = reactive({ show: false, item: null });
+
+      const selectedRows = ref([]);
+      const focusMode = ref(false);
+      const hoveredItem = ref(null);
+
+      // Charts
+      let costChartInstance = null;
+      let statusChartInstance = null;
+
+      // --- HELPERS E FORMATTERS ---
+      const formatMoney = (v) => (v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+      const formatStatus = (s) => ({ 'ok_pagamento': 'Pagar', 'avaria_parceiro': 'Parceiro', 'nao_pagar': 'Reprovado' }[s] || s);
+
+      const setMonth = () => {
+          const d = new Date();
+          filters.start = new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0];
+          filters.end = new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().split('T')[0];
+      };
+
+      const getRowClass = (item) => {
+          if (item._status === 'ok_pagamento') return 'bg-emerald-50 border-l-4 border-l-emerald-500';
+          if (item._status === 'avaria_parceiro') return 'bg-amber-50 border-l-4 border-l-amber-500';
+          if (item._status === 'nao_pagar') return 'bg-rose-50 border-l-4 border-l-rose-500';
+          return 'bg-white border-l-4 border-l-transparent hover:bg-slate-50';
+      };
+
+      const getBtnClass = (curr, type, color) => {
+          const active = curr === type;
+          const base = `w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 border shadow-sm hover:scale-110 active:scale-95`;
+          if (color === 'emerald') return active ? 'bg-emerald-600 text-white border-emerald-500' : 'bg-white text-slate-400 border-slate-200 hover:text-emerald-500 hover:border-emerald-200';
+          if (color === 'amber') return active ? 'bg-amber-600 text-white border-amber-500' : 'bg-white text-slate-400 border-slate-200 hover:text-amber-500 hover:border-amber-200';
+          if (color === 'rose') return active ? 'bg-rose-600 text-white border-rose-500' : 'bg-white text-slate-400 border-slate-200 hover:text-rose-500 hover:border-rose-200';
+          return base;
+      };
+
+      const getBadgeStyle = (s) => ({ 
+          'ok_pagamento': 'bg-emerald-100 text-emerald-700 border-emerald-200', 
+          'avaria_parceiro': 'bg-amber-100 text-amber-700 border-amber-200', 
+          'nao_pagar': 'bg-rose-100 text-rose-700 border-rose-200' 
+      }[s] || 'bg-slate-100 text-slate-500 border-slate-200');
+
+      const navClass = (view) => currentView.value === view ? 'bg-brand-600 text-white shadow-lg shadow-brand-900/30 ring-1 ring-white/10' : 'text-slate-400 hover:bg-slate-50 hover:text-brand-600';
+      const getToastClass = (type) => type === 'error' ? 'bg-rose-600 border-rose-500' : 'bg-kabumblue-900 border-brand-500';
+      const getToastIcon = (type) => type === 'error' ? 'fa-solid fa-circle-exclamation' : 'fa-solid fa-circle-check';
+      const isSelected = (item) => selectedRows.value.includes(item.OS);
+
+      // --- EXCEL LOGIC ---
+      const processarHeader = (matrix) => {
+           if (!matrix.length) return { dadosFormatados: [] };
+           const targets = ['NÚMERO OS', 'NUMERO OS', 'OS', 'ID', 'TEM QUARENTENA?', 'TEM QUARENTENA'];
+           let idx = 0;
+           for(let i=0; i<Math.min(15, matrix.length); i++) {
+             if(matrix[i] && matrix[i].some(c => c && targets.some(t => String(c).toUpperCase().includes(t)))) { idx = i; break; }
+           }
+           const headers = matrix[idx].map(h => h ? String(h).toUpperCase().trim() : `C${Math.random()}`);
+           const rows = matrix.slice(idx+1).map(r => { let obj = {}; r.forEach((c, i) => { if(headers[i]) obj[headers[i]] = c; }); return obj; });
+           return { dadosFormatados: rows };
+      };
+
+      const extractOS = (data) => {
+           if(!data.length) return [];
+           const keys = Object.keys(data[0]);
+           const targets = ['NÚMERO OS', 'NUMERO OS', 'OS', 'ID', 'CODIGO'];
+           const key = keys.find(k => targets.some(t => k.toUpperCase().includes(t)));
+           return key ? data.map(r => r[key]).filter(Boolean) : [];
+      };
+      
+      // --- LIFECYCLE ---
+      onMounted(async () => {
+        window.addEventListener('keydown', handleKeyboard);
+        const savedView = localStorage.getItem('auditor_view');
+        if(savedView) currentView.value = savedView;
+        try {
+          statusMessage.value = 'Conectando...';
+          knowledgeBase.value = await runGoogle('buscarBaseConhecimento');
+          setMonth();
+          statusMessage.value = 'Sistema Online';
+        } catch (e) {
+          statusMessage.value = 'Offline';
+          showToast('Erro ao conectar', 'error');
+        }
+      });
+      onUnmounted(() => { window.removeEventListener('keydown', handleKeyboard); });
+      watch(currentView, (newVal) => {
+          localStorage.setItem('auditor_view', newVal);
+          if(newVal === 'dashboard' && (sessionData.value || []).length > 0) setTimeout(updateCharts, 100);
+      });
+
+      // --- COMPUTED ---
+      const filteredData = computed(() => {
+        let data = sessionData.value || [];
+        if (activeFilter.value !== 'todos') data = data.filter(item => item._status === activeFilter.value);
+        if (searchQuery.value) {
+          const q = searchQuery.value.toLowerCase();
+          data = data.filter(item => 
+            (item.OS || '').toLowerCase().includes(q) || 
+            (item['NOME DO TÉCNICO'] || '').toLowerCase().includes(q)
+          );
+        }
+        if (activeFilter.value === 'todos') return [...data].sort((a, b) => (a._status === 'pendente' ? -1 : 1));
+        return data;
+      });
+
+      const isAllSelected = computed(() => {
+          if ((filteredData.value || []).length === 0) return false;
+          return filteredData.value.every(item => selectedRows.value.includes(item.OS));
+      });
+
+      const completedCount = computed(() => (sessionData.value || []).filter(i => i._status !== 'pendente').length);
+      
+      const stats = computed(() => {
+        let approvedCount = 0, approvedPartsCost = 0, partnerCount = 0, partnerCost = 0, rejectedCount = 0, rejectedCost = 0;
+        (sessionData.value || []).forEach(item => {
+          const cost = item._custoTotal || 0;
+          if (item._status === 'ok_pagamento') { approvedCount++; approvedPartsCost += cost; }
+          else if (item._status === 'avaria_parceiro') { partnerCount++; partnerCost += cost; }
+          else if (item._status === 'nao_pagar') { rejectedCount++; rejectedCost += cost; }
+        });
+        const assemblyCost = approvedCount * AppConfig.TAXA_MONTAGEM;
+        const totalCost = approvedPartsCost + assemblyCost;
+        return { approvedCount, approvedPartsCost, assemblyCost, totalCost, partnerCount, partnerCost, rejectedCount, rejectedCost };
+      });
+
+      // --- MODAL ACTIONS ---
+      const openCfDetails = (item) => {
+          cfModal.item = item;
+          cfModal.show = true;
+      };
+      const closeCfModal = () => {
+          cfModal.show = false;
+          cfModal.item = null;
+      };
+      
+      const openOccurrenceDetails = (subRecord) => {
+          occurrenceModal.item = subRecord;
+          occurrenceModal.show = true;
+      };
+      const closeOccurrenceModal = () => {
+          occurrenceModal.show = false;
+          occurrenceModal.item = null;
+      };
+      
+      const kabumUrl = (cf) => {
+          if(!cf) return '#';
+          return `${AppConfig.KABUM_SEARCH_URL}${cf.toString().trim()}`;
+      };
+
+      // --- HANDLERS ---
+      const handleKeyboard = (e) => {
+          if (!hoveredItem.value) return;
+          const item = (sessionData.value || []).find(i => i.OS === hoveredItem.value);
+          if (!item) return;
+          if (e.key === '1') decidir(item, 'ok_pagamento');
+          if (e.key === '2') decidir(item, 'avaria_parceiro');
+          if (e.key === '3') decidir(item, 'nao_pagar');
+      };
+
+      const toggleSelect = (item) => {
+          const id = item.OS;
+          if (selectedRows.value.includes(id)) selectedRows.value = selectedRows.value.filter(i => i !== id);
+          else selectedRows.value.push(id);
+      };
+
+      const toggleSelectAll = () => {
+          if (isAllSelected.value) selectedRows.value = [];
+          else selectedRows.value = filteredData.value.map(i => i.OS);
+      };
+
+      const bulkDecide = (decision) => {
+          let count = 0;
+          const newData = [...sessionData.value];
+          let changed = false;
+          newData.forEach(item => {
+              if (selectedRows.value.includes(item.OS)) {
+                  item._status = decision;
+                  count++;
+                  changed = true;
+              }
+          });
+          if(changed) {
+            sessionData.value = newData;
+            triggerRef(sessionData);
+          }
+          showToast(`${count} itens atualizados!`);
+          selectedRows.value = [];
+          if(currentView.value === 'dashboard') updateCharts();
+      };
+
+      const showToast = (message, type = 'success', undoAction = null) => {
+          const id = Date.now();
+          toasts.value.push({ id, message, type, undoAction });
+          setTimeout(() => removeToast(id), 5000);
+      };
+      const removeToast = (id) => toasts.value = toasts.value.filter(t => t.id !== id);
+      
+      const openModal = (title, message, confirmFn) => {
+          modal.title = title; modal.message = message; modal.onConfirm = confirmFn; modal.show = true;
+      };
+      const closeModal = () => modal.show = false;
+      const confirmModal = () => { if(modal.onConfirm) modal.onConfirm(); closeModal(); };
+      
+      const handleDrop = (e) => {
+          isDragging.value = false;
+          const files = e.dataTransfer.files;
+          if(files.length) { fileInput.value.files = files; handleFileUpload({ target: { files } }); }
+      };
+      const toggleFocusMode = () => focusMode.value = !focusMode.value;
+
+      // --- CHART ACTIONS ---
+      const updateCharts = () => {
+          if(currentView.value !== 'dashboard' || (sessionData.value || []).length === 0) return;
+          nextTick(() => {
+              const s = stats.value;
+              const ctxStatus = document.getElementById('statusChart');
+              if (ctxStatus) {
+                  if (statusChartInstance) statusChartInstance.destroy();
+                  statusChartInstance = new Chart(ctxStatus, {
+                      type: 'doughnut',
+                      data: {
+                          labels: ['Aprovados', 'Avariados', 'Reprovados', 'Pendentes'],
+                          datasets: [{
+                              data: [s.approvedCount, s.partnerCount, s.rejectedCount, (sessionData.value || []).length - (s.approvedCount + s.partnerCount + s.rejectedCount)],
+                              backgroundColor: ['#10b981', '#f59e0b', '#f43f5e', '#334155'], borderWidth: 0
+                          }]
+                      }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8' } } } }
+                  });
+              }
+              const ctxCost = document.getElementById('costChart');
+              if (ctxCost) {
+                  if (costChartInstance) costChartInstance.destroy();
+                  costChartInstance = new Chart(ctxCost, {
+                      type: 'bar',
+                      data: {
+                          labels: ['Peças', 'Montagens', 'Avariados', 'Garantia'],
+                          datasets: [{
+                              label: 'R$', data: [s.approvedPartsCost, s.assemblyCost, s.partnerCost, s.rejectedCost],
+                              backgroundColor: ['#2563eb', '#6366f1', '#f59e0b', '#f43f5e'], borderRadius: 4
+                          }]
+                      }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, scales: { y: { ticks: { color: '#94a3b8' } }, x: { ticks: { color: '#94a3b8' } } } } }
+                  });
+              }
+          });
+      };
+
+      // --- DATA LOGIC ---
+      const handleFileUpload = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        loading.value = true; statusMessage.value = 'Lendo arquivo...';
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          try {
+            const workbook = XLSX.read(evt.target.result, { type: 'array' });
+            const rawData = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { header: 1 });
+            const { dadosFormatados } = processarHeader(rawData);
+            const filtered = dadosFormatados.filter(row => {
+              const val = Object.entries(row).find(([k]) => k.toUpperCase().includes('QUARENTENA'))?.[1];
+              return val && String(val).toUpperCase() === 'SIM';
+            });
+            const osList = extractOS(filtered);
+            if (osList.length === 0) {
+              showToast("Nenhum item em quarentena encontrado.", "error");
+              loading.value = false; statusMessage.value = 'Aguardando...';
+              return;
+            }
+            statusMessage.value = `Buscando ${osList.length} itens...`;
+            runGoogle('buscarDadosPorListaOS', osList)
+              .then(data => processServerData(data, osList))
+              .catch(err => showToast("Erro: " + err, "error"))
+              .finally(() => { loading.value = false; statusMessage.value = 'Pronto'; });
+          } catch (err) {
+            console.error(err); showToast("Erro ao ler arquivo", "error"); loading.value = false;
+          }
+        };
+        reader.readAsArrayBuffer(file);
+        e.target.value = '';
+      };
+
+      const fetchByPeriod = () => {
+        if (!filters.start || !filters.end) return showToast("Defina as datas.", "error");
+        loading.value = true; statusMessage.value = 'Buscando...';
+        runGoogle('buscarDadosPorPeriodo', filters.start, filters.end)
+          .then(data => { processServerData(data); updateCharts(); })
+          .catch(err => showToast("Erro: " + err, "error"))
+          .finally(() => { loading.value = false; statusMessage.value = 'Pronto'; });
+      };
+
+      const processServerData = (data, requestedList = null) => {
+        const safeData = data || [];
+        if (requestedList && requestedList.length > 0) {
+           const foundSet = new Set(safeData.map(d => {
+              const val = d.OS || d['NÚMERO OS'] || d.ID || d['_idx_os'];
+              return val ? String(val).trim().toUpperCase() : '';
+           }));
+           const missing = requestedList.filter(os => !foundSet.has(String(os).trim().toUpperCase()));
+           const missingRecords = missing.map(os => ({
+              OS: os, 'NOME DO TÉCNICO': 'NÃO ENCONTRADO', 'QUAL PROBLEMA?': 'DADOS NÃO LOCALIZADOS',
+              'DETALHE O PROBLEMA ENCONTRADO': 'Esta OS consta no arquivo de upload mas não foi encontrada na base de Divergência.',
+              'FOTO DA AVARIA!': null, 'CF PRODUTO ANTIGO': '', 'CF PRODUTO NOVO': '',
+              _custoAntigo: 0, _custoNovo: 0, _custoTotal: 0, _status: 'pendente', _sugestao: null, _subRecords: []
+           }));
+           safeData.push(...missingRecords);
+        }
+        if (safeData.length === 0) { showToast("Nenhum dado encontrado.", "error"); return; }
+        
+        const grouped = {};
+        safeData.forEach(d => {
+          const rawOS = d.OS || d['NÚMERO OS'] || d.ID || d['_idx_os'] || 'N/A';
+          const osKey = String(rawOS).trim().toUpperCase();
+          if (!grouped[osKey]) grouped[osKey] = [];
+          grouped[osKey].push(d);
+        });
+
+        sessionData.value = Object.keys(grouped).map(osKey => {
+          const records = grouped[osKey];
+          let totalCustoAntigo = 0, totalCustoNovo = 0, totalCustoTotal = 0;
+          let fullText = "";
+          let techs = new Set(), photos = [];
+          
+          const subRecords = records.map((r, i) => {
+              const cTotal = parseFloat(r._custoTotal) || 0;
+              totalCustoTotal += cTotal;
+              totalCustoAntigo += (parseFloat(r._custoAntigo)||0);
+              totalCustoNovo += (parseFloat(r._custoNovo)||0);
+              
+              const prob = r['_idx_problema'] || r['QUAL PROBLEMA?'] || '';
+              const det = r['_idx_detalhe'] || r['DETALHE O PROBLEMA ENCONTRADO'] || '';
+              const tec = r['_idx_tecnico'] || r['NOME DO TÉCNICO'] || 'N/A';
+              
+              fullText += ` ${prob} ${det}`;
+              if (tec !== 'N/A') techs.add(tec);
+              
+              const photo = r['FOTO DA AVARIA!'];
+              if (photo && photo.startsWith('http')) photos.push(photo);
+
+              return { 
+                id: i + 1, problema: prob, detalhe: det, custo: cTotal,
+                processo: r['_idx_processo'], os: osKey, inicio: r['_idx_inicio'], fim: r['_idx_fim'],
+                pedido: r['_idx_pedido'], produtoDiv: r['_idx_prod_div'],
+                tipoProb: r['_idx_tipo_problema'] || r['_idx_tipo_troca'], 
+                tipoTroca: r['_idx_tipo_troca'], avariaCust: r['_idx_avaria_cust']
+              };
+          });
+          
+          const r0 = records[0];
+          return {
+            OS: osKey, 'NOME DO TÉCNICO': Array.from(techs).join(', '),
+            'CF PRODUTO ANTIGO': r0['CF PRODUTO ANTIGO'], 'CF PRODUTO NOVO': r0['CF PRODUTO NOVO'],
+            _subRecords: subRecords, _photos: photos,
+            _custoAntigo: totalCustoAntigo, _custoNovo: totalCustoNovo, _custoTotal: totalCustoTotal,
+            _textoAnalise: fullText.trim(),
+            _sugestao: records[0]._sugestao || MLService.predict(fullText.trim(), knowledgeBase.value),
+            _status: records[0]._status || 'pendente',
+            _isDup: records.length > 1, _dupCount: records.length
+          };
+        });
+
+        // Set Data
+        triggerRef(sessionData);
+
+        // Run Background ML
+        runBackgroundML();
+      };
+
+      const runBackgroundML = async () => {
+          const data = sessionData.value;
+          const chunkSize = 20; 
+          
+          const processChunk = (startIndex) => {
+              if (startIndex >= data.length) return;
+              let madeChanges = false;
+              const end = Math.min(startIndex + chunkSize, data.length);
+              
+              for (let i = startIndex; i < end; i++) {
+                  const item = data[i];
+                  if (!item._sugestao && item._textoAnalise) {
+                      const prediction = MLService.predict(item._textoAnalise, knowledgeBase.value);
+                      if (prediction) {
+                          item._sugestao = prediction;
+                          madeChanges = true;
+                      }
+                  }
+              }
+              if (madeChanges) triggerRef(sessionData);
+              requestAnimationFrame(() => processChunk(end));
+          };
+          processChunk(0);
+      };
+
+      const decidir = (item, decision, learn = true) => {
+        const oldStatus = item._status;
+        item._status = decision;
+        if (learn && item._textoAnalise && item._textoAnalise.length > 3) runGoogle('salvarAprendizado', item._textoAnalise, decision);
+        if(currentView.value === 'dashboard') updateCharts();
+        showToast(`Definido como: ${formatStatus(decision)}`, 'success', () => {
+            item._status = oldStatus;
+            triggerRef(sessionData); 
+            if(currentView.value === 'dashboard') updateCharts();
+        });
+      };
+
+      const iniciarSalvamento = () => {
+          if (completedCount.value === 0) {
+              openModal("Salvar Sessão Vazia?", "Nenhum item foi classificado. Deseja salvar mesmo assim?", salvarSessao);
+          } else {
+              salvarSessao();
+          }
+      };
+
+      const salvarSessao = () => {
+        loading.value = true;
+        const name = editingSessionName.value || `Auditoria ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
+        const isUpdate = !!editingSessionName.value;
+        runGoogle('salvarSessaoNaPlanilha', name, JSON.parse(JSON.stringify(sessionData.value)), isUpdate)
+          .then(res => {
+            showToast("Sessão salva com sucesso!", "success");
+            if (!isUpdate) editingSessionName.value = res.nomeAba;
+          })
+          .catch(err => showToast("Erro ao salvar: " + err, "error"))
+          .finally(() => loading.value = false);
+      };
+
+      const carregarHistorico = () => {
+        historyLoading.value = true;
+        runGoogle('listarSessoesSalvas').then(list => historyList.value = list).finally(() => historyLoading.value = false);
+      };
+      const loadSession = (name) => {
+        loading.value = true;
+        runGoogle('carregarSessaoAntiga', name).then(data => {
+            editingSessionName.value = name;
+            processServerData(data);
+            currentView.value = 'dashboard';
+            setTimeout(updateCharts, 100);
+          }).catch(err => showToast("Erro: " + err, "error")).finally(() => loading.value = false);
+      };
+
+      // --- EXPORT FUNCTIONS (Delegates to ReportService) ---
+      const exportarCSV = () => ReportService.exportarCSV(sessionData.value);
+      const exportarPDF = () => ReportService.exportarPDF(sessionData.value, stats.value);
+
+      return {
+        currentView, viewTitle, loading, statusMessage, sessionData, filteredData,
+        filters, historyList, historyLoading, editingSessionName, searchQuery,
+        stats, completedCount, fileInput, toasts, activeFilter, availableFilters, modal, isDragging,
+        selectedRows, isAllSelected, focusMode, hoveredItem,
+        cfModal, occurrenceModal, // Retorna os modais
+        handleFileUpload, handleDrop, fetchByPeriod, setMonth, carregarHistorico, loadSession,
+        decidir, bulkDecide, toggleSelect, toggleSelectAll, isSelected,
+        iniciarSalvamento, salvarSessao, exportarCSV, exportarPDF, removeToast, closeModal, confirmModal,
+        openCfDetails, closeCfModal, kabumUrl,
+        openOccurrenceDetails, closeOccurrenceModal, // Retorna ações do novo modal
+        toggleFocusMode,
+        formatMoney, formatStatus, getRowClass, getBtnClass, getBadgeStyle, navClass, getToastClass, getToastIcon,
+        processarHeader, extractOS
+      };
+    }
+  }).mount('#app');
+</script>
