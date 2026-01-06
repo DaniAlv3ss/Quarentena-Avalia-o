@@ -7,46 +7,13 @@
     KABUM_SEARCH_URL: 'https://www.kabum.com.br/busca/'
   };
 
-  // --- ML SERVICE ---
-  const MLService = {
-    stopWords: new Set(['o','a','os','as','um','uma','de','do','da','em','no','na','por','pelo','pela','para','com','sem','e','ou','que','seu','sua','ao','aos','nao','sim']),
-    tokenize(text) {
-      if (!text) return [];
-      return text.toString().toLowerCase()
-        .replace(/[^\w\s\u00C0-\u00FF]/gi, ' ')
-        .split(/\s+/)
-        .filter(w => w.length > 2 && !this.stopWords.has(w));
-    },
-    predict(text, knowledgeBase) {
-      if (!text || !knowledgeBase || knowledgeBase.length === 0) return null;
-      const inputTokens = this.tokenize(text);
-      if (inputTokens.length === 0) return null;
-      const scores = { 'ok_pagamento': 0, 'avaria_parceiro': 0, 'nao_pagar': 0 };
-      
-      for (let i = 0; i < knowledgeBase.length; i++) {
-         const rule = knowledgeBase[i];
-         const ruleTokens = this.tokenize(rule.padrao);
-         if (ruleTokens.length === 0) continue;
-         let matches = 0;
-         for (let j = 0; j < inputTokens.length; j++) {
-           if (ruleTokens.includes(inputTokens[j])) matches++;
-         }
-         if (matches > 0) {
-           const weight = matches / (ruleTokens.length + 0.5);
-           if (scores[rule.decisao] !== undefined) scores[rule.decisao] += weight;
-         }
-      }
-      let maxScore = 0; let winner = null;
-      for (const cat in scores) {
-        if (scores[cat] > maxScore) { maxScore = scores[cat]; winner = cat; }
-      }
-      return maxScore >= 0.4 ? winner : null;
-    }
-  };
-
   // --- MOCK SERVICE (Fallback local) ---
   const mockService = {
-    buscarBaseConhecimento: () => Promise.resolve([{ padrao: 'tela trincada', decisao: 'avaria_parceiro' }]),
+    buscarBaseConhecimento: () => Promise.resolve([]),
+    buscarHistoricoTreinamento: () => Promise.resolve([
+        { texto: 'Gabinete amassado na lateral', categoria: 'avaria_parceiro' },
+        { texto: 'Placa mãe não liga curto', categoria: 'ok_pagamento' }
+    ]),
     buscarDadosPorListaOS: (list) => new Promise(r => setTimeout(() => r(list.map(os => ({
       OS: os, 'NOME DO TÉCNICO': 'Técnico Mock', 
       'QUAL PROBLEMA?': 'Tela Defeito', 'DETALHE O PROBLEMA ENCONTRADO': 'Trincou',
@@ -80,14 +47,15 @@
 
       // State
       const loading = ref(false);
-      const statusMessage = ref('Pronto');
+      const statusMessage = ref('Iniciando...');
       const sessionData = shallowRef([]); 
-      const knowledgeBase = ref([]);
       const historyList = ref([]);
       const historyLoading = ref(false);
       const editingSessionName = ref(null);
       const searchQuery = ref('');
-      const activeFilter = ref('todos');
+      
+      const activeFilter = ref('pendente');
+      
       const availableFilters = [
           { key: 'todos', label: 'Todos' },
           { key: 'pendente', label: 'Pendentes' },
@@ -97,12 +65,9 @@
       ];
       const filters = reactive({ start: '', end: '' });
       const fileInput = ref(null);
-      
-      // UX State
       const isDragging = ref(false);
       const toasts = ref([]);
       
-      // MODAL STATES (SIMPLIFICADOS)
       const modal = reactive({ show: false, title: '', message: '', onConfirm: null });
       const cfModal = reactive({ show: false, item: null });
       const occurrenceModal = reactive({ show: false, item: null });
@@ -111,7 +76,6 @@
       const focusMode = ref(false);
       const hoveredItem = ref(null);
 
-      // Charts
       let costChartInstance = null;
       let statusChartInstance = null;
 
@@ -179,13 +143,18 @@
         const savedView = localStorage.getItem('auditor_view');
         if(savedView) currentView.value = savedView;
         try {
-          statusMessage.value = 'Conectando...';
-          knowledgeBase.value = await runGoogle('buscarBaseConhecimento');
+          statusMessage.value = 'Treinando IA...';
+          const trainingData = await runGoogle('carregarHistoricoTreinamento');
+          if(window.MLService && trainingData.length > 0) {
+            window.MLService.train(trainingData);
+            statusMessage.value = 'IA Pronta (' + trainingData.length + ' casos)';
+          } else {
+            statusMessage.value = 'IA Sem Dados';
+          }
           setMonth();
-          statusMessage.value = 'Sistema Online';
         } catch (e) {
-          statusMessage.value = 'Offline';
-          showToast('Erro ao conectar', 'error');
+          statusMessage.value = 'Erro Conexão';
+          showToast('Erro ao carregar IA: ' + e, 'error');
         }
       });
       onUnmounted(() => { window.removeEventListener('keydown', handleKeyboard); });
@@ -215,6 +184,11 @@
       });
 
       const completedCount = computed(() => (sessionData.value || []).filter(i => i._status !== 'pendente').length);
+      const progressPercent = computed(() => {
+          const total = (sessionData.value || []).length;
+          if (total === 0) return 0;
+          return (completedCount.value / total) * 100;
+      });
       
       const stats = computed(() => {
         let approvedCount = 0, approvedPartsCost = 0, partnerCount = 0, partnerCost = 0, rejectedCount = 0, rejectedCost = 0;
@@ -229,31 +203,13 @@
         return { approvedCount, approvedPartsCost, assemblyCost, totalCost, partnerCount, partnerCost, rejectedCount, rejectedCost };
       });
 
-      // --- MODAL ACTIONS ---
-      const openCfDetails = (item) => {
-          cfModal.item = item;
-          cfModal.show = true;
-      };
-      const closeCfModal = () => {
-          cfModal.show = false;
-          cfModal.item = null;
-      };
-      
-      const openOccurrenceDetails = (subRecord) => {
-          occurrenceModal.item = subRecord;
-          occurrenceModal.show = true;
-      };
-      const closeOccurrenceModal = () => {
-          occurrenceModal.show = false;
-          occurrenceModal.item = null;
-      };
-      
-      const kabumUrl = (cf) => {
-          if(!cf) return '#';
-          return `${AppConfig.KABUM_SEARCH_URL}${cf.toString().trim()}`;
-      };
+      // --- ACTIONS & HANDLERS ---
+      const openCfDetails = (item) => { cfModal.item = item; cfModal.show = true; };
+      const closeCfModal = () => { cfModal.show = false; cfModal.item = null; };
+      const openOccurrenceDetails = (subRecord) => { occurrenceModal.item = subRecord; occurrenceModal.show = true; };
+      const closeOccurrenceModal = () => { occurrenceModal.show = false; occurrenceModal.item = null; };
+      const kabumUrl = (cf) => (!cf ? '#' : `${AppConfig.KABUM_SEARCH_URL}${cf.toString().trim()}`);
 
-      // --- HANDLERS ---
       const handleKeyboard = (e) => {
           if (!hoveredItem.value) return;
           const item = (sessionData.value || []).find(i => i.OS === hoveredItem.value);
@@ -301,9 +257,7 @@
       };
       const removeToast = (id) => toasts.value = toasts.value.filter(t => t.id !== id);
       
-      const openModal = (title, message, confirmFn) => {
-          modal.title = title; modal.message = message; modal.onConfirm = confirmFn; modal.show = true;
-      };
+      const openModal = (title, message, confirmFn) => { modal.title = title; modal.message = message; modal.onConfirm = confirmFn; modal.show = true; };
       const closeModal = () => modal.show = false;
       const confirmModal = () => { if(modal.onConfirm) modal.onConfirm(); closeModal(); };
       
@@ -451,26 +405,39 @@
           });
           
           const r0 = records[0];
+          
+          // CONTEXTO DE REGRAS (PESOS)
+          // Pega dados do primeiro registro para aplicar as regras
+          const context = {
+            avariaCust: r0['_idx_avaria_cust'],
+            processo: r0['_idx_processo']
+          };
+
+          // PREDIÇÃO HÍBRIDA
+          let sugestaoInicial = null;
+          if (window.MLService && fullText.length > 5) {
+             sugestaoInicial = window.MLService.predict(fullText.trim(), context);
+          }
+          
           return {
             OS: osKey, 'NOME DO TÉCNICO': Array.from(techs).join(', '),
             'CF PRODUTO ANTIGO': r0['CF PRODUTO ANTIGO'], 'CF PRODUTO NOVO': r0['CF PRODUTO NOVO'],
             _subRecords: subRecords, _photos: photos,
             _custoAntigo: totalCustoAntigo, _custoNovo: totalCustoNovo, _custoTotal: totalCustoTotal,
             _textoAnalise: fullText.trim(),
-            _sugestao: records[0]._sugestao || MLService.predict(fullText.trim(), knowledgeBase.value),
+            _sugestao: records[0]._sugestao || sugestaoInicial,
             _status: records[0]._status || 'pendente',
-            _isDup: records.length > 1, _dupCount: records.length
+            _isDup: records.length > 1, _dupCount: records.length,
+            _context: context // Salva contexto para uso no background ML
           };
         });
 
-        // Set Data
         triggerRef(sessionData);
-
-        // Run Background ML
         runBackgroundML();
       };
 
       const runBackgroundML = async () => {
+          if (!window.MLService) return;
           const data = sessionData.value;
           const chunkSize = 20; 
           
@@ -481,8 +448,9 @@
               
               for (let i = startIndex; i < end; i++) {
                   const item = data[i];
-                  if (!item._sugestao && item._textoAnalise) {
-                      const prediction = MLService.predict(item._textoAnalise, knowledgeBase.value);
+                  // Passa o contexto (regras) também no processamento background
+                  if (!item._sugestao && item._textoAnalise && item._textoAnalise.length > 5) {
+                      const prediction = window.MLService.predict(item._textoAnalise, item._context);
                       if (prediction) {
                           item._sugestao = prediction;
                           madeChanges = true;
@@ -498,13 +466,31 @@
       const decidir = (item, decision, learn = true) => {
         const oldStatus = item._status;
         item._status = decision;
-        if (learn && item._textoAnalise && item._textoAnalise.length > 3) runGoogle('salvarAprendizado', item._textoAnalise, decision);
+        
+        // APRENDIZADO ONLINE (Somente detalhe para evitar sujeira)
+        if (learn && item._subRecords && item._subRecords.length > 0) {
+            const sentTexts = new Set(); 
+            item._subRecords.forEach(sub => {
+                let textoLimpo = (sub.detalhe || '').trim();
+                if (textoLimpo.length < 4) textoLimpo = (sub.problema || '').trim();
+
+                if (textoLimpo.length > 4 && 
+                    !textoLimpo.includes('DADOS NÃO LOCALIZADOS') &&
+                    !sentTexts.has(textoLimpo)) {
+                    runGoogle('salvarAprendizado', textoLimpo, decision);
+                    sentTexts.add(textoLimpo);
+                }
+            });
+        }
+        
         if(currentView.value === 'dashboard') updateCharts();
+        
         showToast(`Definido como: ${formatStatus(decision)}`, 'success', () => {
             item._status = oldStatus;
             triggerRef(sessionData); 
             if(currentView.value === 'dashboard') updateCharts();
         });
+        triggerRef(sessionData);
       };
 
       const iniciarSalvamento = () => {
@@ -542,21 +528,21 @@
           }).catch(err => showToast("Erro: " + err, "error")).finally(() => loading.value = false);
       };
 
-      // --- EXPORT FUNCTIONS (Delegates to ReportService) ---
+      // --- EXPORT FUNCTIONS ---
       const exportarCSV = () => ReportService.exportarCSV(sessionData.value);
       const exportarPDF = () => ReportService.exportarPDF(sessionData.value, stats.value);
 
       return {
         currentView, viewTitle, loading, statusMessage, sessionData, filteredData,
         filters, historyList, historyLoading, editingSessionName, searchQuery,
-        stats, completedCount, fileInput, toasts, activeFilter, availableFilters, modal, isDragging,
+        stats, completedCount, progressPercent, fileInput, toasts, activeFilter, availableFilters, modal, isDragging,
         selectedRows, isAllSelected, focusMode, hoveredItem,
-        cfModal, occurrenceModal, // Retorna os modais
+        cfModal, occurrenceModal, 
         handleFileUpload, handleDrop, fetchByPeriod, setMonth, carregarHistorico, loadSession,
         decidir, bulkDecide, toggleSelect, toggleSelectAll, isSelected,
         iniciarSalvamento, salvarSessao, exportarCSV, exportarPDF, removeToast, closeModal, confirmModal,
         openCfDetails, closeCfModal, kabumUrl,
-        openOccurrenceDetails, closeOccurrenceModal, // Retorna ações do novo modal
+        openOccurrenceDetails, closeOccurrenceModal,
         toggleFocusMode,
         formatMoney, formatStatus, getRowClass, getBtnClass, getBadgeStyle, navClass, getToastClass, getToastIcon,
         processarHeader, extractOS
