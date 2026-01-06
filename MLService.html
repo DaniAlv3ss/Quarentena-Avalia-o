@@ -1,0 +1,106 @@
+<script>
+  /**
+   * SERVIÇO DE MACHINE LEARNING HÍBRIDO (Regras + Naive Bayes)
+   * 1. Verifica regras determinísticas ("Pesos").
+   * 2. Se não houver regra, usa IA probabilística.
+   */
+  window.MLService = {
+    model: {
+      tokenizer: {
+        stopWords: new Set(['o','a','os','as','um','uma','de','do','da','em','no','na','por','pelo','pela','para','com','e','ou','que','seu','sua','ao','aos','sim','nao','ser','estar','ter','haver','foi']),
+        stem(word) {
+          if (!word || word.length < 4) return word;
+          return word.replace(/(?:(s|es|a|o|am|em|indo|endo|ando|ada|ado|aram|iram))$/, '');
+        },
+        tokenize(text) {
+          if (!text) return [];
+          return text.toString().toLowerCase()
+            .replace(/[^\w\s\u00C0-\u00FF]/gi, ' ')
+            .split(/\s+/)
+            .filter(w => w.length > 2 && !this.stopWords.has(w))
+            .map(w => this.stem(w));
+        }
+      },
+      // Estado do Modelo
+      categories: {},
+      docCount: 0,
+      
+      reset() {
+        this.categories = {};
+        this.docCount = 0;
+      },
+      
+      train(dataset) {
+        this.reset();
+        if(!dataset || dataset.length === 0) return;
+
+        dataset.forEach(item => {
+          const cat = item.categoria;
+          if(!this.categories[cat]) this.categories[cat] = { docCount: 0, wordCounts: {}, totalWords: 0 };
+          
+          this.categories[cat].docCount++;
+          this.docCount++;
+          
+          const tokens = this.tokenizer.tokenize(item.texto);
+          tokens.forEach(token => {
+            if(!this.categories[cat].wordCounts[token]) this.categories[cat].wordCounts[token] = 0;
+            this.categories[cat].wordCounts[token]++;
+            this.categories[cat].totalWords++;
+          });
+        });
+        console.log("ML Treinado com " + this.docCount + " exemplos.");
+      },
+      
+      classify(text) {
+        if (!text || this.docCount === 0) return null;
+        const tokens = this.tokenizer.tokenize(text);
+        if (tokens.length === 0) return null;
+
+        let bestCategory = null;
+        let maxProb = -Infinity;
+        
+        Object.keys(this.categories).forEach(catName => {
+          const catData = this.categories[catName];
+          let logProb = Math.log(catData.docCount / this.docCount);
+          
+          tokens.forEach(token => {
+            const wordCount = catData.wordCounts[token] || 0;
+            const pWord = (wordCount + 1) / (catData.totalWords + Object.keys(catData.wordCounts).length + 1);
+            logProb += Math.log(pWord);
+          });
+          
+          if (logProb > maxProb) {
+            maxProb = logProb;
+            bestCategory = catName;
+          }
+        });
+        
+        return bestCategory;
+      }
+    },
+
+    // Interface pública simplificada
+    train(data) { this.model.train(data); },
+    
+    predict(text, context) {
+        // --- LÓGICA DE PESOS / REGRAS DE NEGÓCIO ---
+        if (context) {
+            const avaria = (context.avariaCust || '').toString().trim().toLowerCase();
+            const processo = (context.processo || '').toString().trim().toLowerCase();
+
+            // Peso 1: Avaria Customiza? -> Sim -> Parceiro
+            if (avaria === 'sim') {
+                return 'avaria_parceiro';
+            }
+
+            // Peso 2: Processo? -> Antes da montagem -> Reprovado
+            if (processo.includes('antes')) {
+                return 'nao_pagar';
+            }
+        }
+
+        // Se não caiu nas regras, usa a IA Estatística
+        return this.model.classify(text); 
+    }
+  };
+</script>
