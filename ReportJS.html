@@ -1,72 +1,181 @@
 <script>
-const ReportService = {
-  config: { taxaMontagem: 189.90, moeda: { style: 'currency', currency: 'BRL' } },
-  _fmt(val) { return (val || 0).toLocaleString('pt-BR', this.config.moeda); },
-
-  exportarCSV(dados) {
-    if (!dados || dados.length === 0) { alert("Nada para exportar."); return; }
-    let csvContent = "data:text/csv;charset=utf-8,ID,OS,Tecnico,Problema,Detalhe,Custo Pecas,Status\n";
-    dados.forEach((row, i) => {
-      const subs = row._subRecords || [];
-      const probs = subs.length > 0 ? subs.map(s => `[${s.id}] ${s.problema}: ${s.detalhe}`).join(" | ") : (row['QUAL PROBLEMA?'] || '');
-      const cols = [ i + 1, row.OS || row['NÚMERO OS'], row['NOME DO TÉCNICO'], row['QUAL PROBLEMA?'], probs, row._custoTotal, row._status ];
-      const rowStr = cols.map(c => `"${String(c || '').replace(/"/g, '""')}"`).join(",");
-      csvContent += rowStr + "\r\n";
-    });
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `auditoria_avarias_${new Date().toISOString().slice(0, 10)}.csv`);
-    document.body.appendChild(link); link.click(); document.body.removeChild(link);
+window.ReportService = {
+  // CONFIG
+  colors: {
+    primary: [234, 88, 12], // Brand Orange
+    header: [30, 41, 59], // Slate 800
+    rowEven: [248, 250, 252], // Slate 50
+    text: [51, 65, 85]
   },
 
-  exportarPDF(dados, stats) {
-    if (!dados || dados.length === 0) { alert("Nada para exportar."); return; }
+  formatCurrency(value) {
+    return (value || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+  },
+
+  formatStatus(s) {
+    const map = {
+      'ok_pagamento': 'APROVADO',
+      'avaria_parceiro': 'AVARIA PARCEIRO',
+      'nao_pagar': 'REPROVADO',
+      'pendente': 'PENDENTE'
+    };
+    return map[s] || (s ? s.toUpperCase() : '-');
+  },
+
+  // --- GERADOR DE CSV ---
+  exportarCSV(dados, colunasSelecionadas) {
+    if (!dados || dados.length === 0) return alert("Sem dados para exportar.");
+
+    // Se nenhuma coluna foi passada, usa todas (fallback)
+    let cols = colunasSelecionadas;
+    if (!cols || cols.length === 0) {
+       cols = Object.keys(dados[0]);
+    }
+
+    // Processa os dados para "Aplanar" objetos complexos (Flatten)
+    const flatData = dados.map(item => {
+        const flat = { ...item };
+        
+        // Pega dados da última ocorrência para facilitar leitura
+        if (item._subRecords && item._subRecords.length > 0) {
+            const last = item._subRecords[item._subRecords.length - 1];
+            flat.PROBLEMA_PRINCIPAL = last.problema;
+            flat.DETALHE_PRINCIPAL = last.detalhe;
+        } else {
+            flat.PROBLEMA_PRINCIPAL = item['QUAL PROBLEMA?'] || '';
+            flat.DETALHE_PRINCIPAL = item['DETALHE O PROBLEMA ENCONTRADO'] || '';
+        }
+        
+        flat.STATUS_FINAL = this.formatStatus(item._status);
+        
+        return flat;
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(flatData, { header: cols });
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Dados Validação");
+    
+    // Ajuste de largura automática (Simples)
+    const wscols = cols.map(c => ({ wch: 20 }));
+    worksheet['!cols'] = wscols;
+
+    XLSX.writeFile(workbook, `Validacao_Quarentena_${new Date().toISOString().slice(0,10)}.csv`);
+  },
+
+  // --- GERADOR DE PDF ---
+  exportarPDF(dados, stats, tipo = 'completo') {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF();
-    const today = new Date().toLocaleDateString();
+    const pageWidth = doc.internal.pageSize.width;
+    const pageHeight = doc.internal.pageSize.height;
+    
+    // --- CABEÇALHO PADRÃO ---
+    doc.setFillColor(...this.colors.header);
+    doc.rect(0, 0, pageWidth, 25, 'F');
+    
+    doc.setFontSize(18);
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "bold");
+    doc.text("Relatório de Validação de Quarentena", 14, 16);
+    
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "normal");
+    doc.text(`Gerado em: ${new Date().toLocaleString()}`, 14, 22);
 
-    doc.setFillColor(234, 88, 12); doc.rect(0, 0, 210, 24, 'F');
-    doc.setTextColor(255, 255, 255); doc.setFontSize(18); doc.setFont("helvetica", "bold");
-    doc.text("Relatório de Auditoria Técnica", 14, 16);
-    doc.setFontSize(10); doc.setFont("helvetica", "normal"); doc.text(`Gerado em: ${today}`, 195, 16, { align: 'right' });
+    let currentY = 35;
 
-    let y = 35; doc.setTextColor(40, 40, 40); doc.setFontSize(12); doc.setFont("helvetica", "bold"); doc.text("Resumo Executivo", 14, y);
-    y += 8; const startX = 14; const boxWidth = 45; const boxHeight = 22; const gap = 5;
+    // --- BLOCO FINANCEIRO (SEMPRE APARECE) ---
+    doc.setDrawColor(200, 200, 200);
+    doc.setFillColor(255, 255, 255);
+    
+    // Card 1: Aprovados (Peça + Montagem)
+    this.drawCard(doc, 14, currentY, 55, 
+        "Custo Aprovado", 
+        this.formatCurrency(stats.approvedPartsCost + stats.assemblyCost),
+        `${stats.approvedCount} und. (R$ ${this.formatCurrency(stats.assemblyCost)} Montagem)`, 
+        [22, 163, 74]); // Green
 
-    const drawCard = (x, title, value, color) => {
-      doc.setDrawColor(220, 220, 220); doc.setFillColor(250, 250, 250); doc.roundedRect(x, y, boxWidth, boxHeight, 2, 2, 'FD');
-      doc.setFontSize(7); doc.setTextColor(150, 150, 150); doc.text(title.toUpperCase(), x + 3, y + 8);
-      doc.setFontSize(11); doc.setTextColor(color[0], color[1], color[2]); doc.text(value, x + 3, y + 18);
-    };
+    // Card 2: Avaria Parceiro
+    this.drawCard(doc, 75, currentY, 55, 
+        "Custo Avaria", 
+        this.formatCurrency(stats.partnerCost), 
+        `${stats.partnerCount} und.`, 
+        [234, 179, 8]); // Amber
 
-    drawCard(startX, "Custo Total", this._fmt(stats.totalCost), [50, 50, 50]);
-    drawCard(startX + boxWidth + gap, "Aprovados", `${stats.approvedCount} un.`, [16, 185, 129]);
-    drawCard(startX + (boxWidth + gap) * 2, "Avariados", `${stats.partnerCount} un.`, [245, 158, 11]);
-    drawCard(startX + (boxWidth + gap) * 3, "Reprovados", `${stats.rejectedCount} un.`, [244, 63, 94]);
+    // Card 3: Reprovados
+    this.drawCard(doc, 136, currentY, 55, 
+        "Custo Reprovado", 
+        this.formatCurrency(stats.rejectedCost), 
+        `${stats.rejectedCount} und.`, 
+        [225, 29, 72]); // Rose
 
-    y += 35; doc.setFontSize(12); doc.setTextColor(40, 40, 40); doc.text("Detalhamento das Ordens de Serviço", 14, y);
+    currentY += 40;
 
-    const tableBody = dados.map((item, index) => {
-      let statusTxt = item._status;
-      if (statusTxt === 'ok_pagamento') statusTxt = 'PAGAR';
-      if (statusTxt === 'avaria_parceiro') statusTxt = 'PARCEIRO';
-      if (statusTxt === 'nao_pagar') statusTxt = 'REPROVADO';
-      return [index + 1, item.OS || item['NÚMERO OS'] || '-', (item['NOME DO TÉCNICO'] || '').substring(0, 20), (item._subRecords || []).length > 0 ? `${item._subRecords.length} ocorrências` : (item['QUAL PROBLEMA?'] || '').substring(0, 30), this._fmt(item._custoTotal), statusTxt];
-    });
+    // --- TABELA DETALHADA (SÓ SE FOR COMPLETO) ---
+    if (tipo === 'completo') {
+        doc.setFontSize(12);
+        doc.setTextColor(0, 0, 0);
+        doc.setFont("helvetica", "bold");
+        doc.text("Detalhamento por Ordem de Serviço", 14, currentY);
+        currentY += 5;
 
-    doc.autoTable({
-      head: [['#', 'OS', 'Técnico', 'Diagnóstico', 'Custo Total', 'Decisão']], body: tableBody, startY: y + 5, theme: 'grid',
-      headStyles: { fillColor: [234, 88, 12], textColor: 255, fontStyle: 'bold' }, styles: { fontSize: 8, cellPadding: 3 },
-      didParseCell: function(data) {
-        if (data.section === 'body' && data.column.index === 5) {
-          if (data.cell.text[0] === 'PAGAR') data.cell.styles.textColor = [22, 163, 74];
-          if (data.cell.text[0] === 'PARCEIRO') data.cell.styles.textColor = [217, 119, 6];
-          if (data.cell.text[0] === 'REPROVADO') data.cell.styles.textColor = [220, 38, 38];
-        }
-      }
-    });
-    doc.save(`Relatorio_${new Date().toISOString().slice(0, 10)}.pdf`);
+        const tableBody = dados.map(item => {
+            const lastSub = (item._subRecords || [])[item._subRecords.length - 1] || {};
+            const problema = lastSub.problema || item['QUAL PROBLEMA?'] || '-';
+            
+            return [
+                item.OS || item['NÚMERO OS'],
+                item['NOME DO TÉCNICO'] || '-',
+                problema.substring(0, 40) + (problema.length > 40 ? '...' : ''),
+                this.formatStatus(item._status),
+                this.formatCurrency(item._custoTotal)
+            ];
+        });
+
+        doc.autoTable({
+            startY: currentY,
+            head: [['OS', 'Técnico', 'Problema', 'Status', 'Custo Total']],
+            body: tableBody,
+            theme: 'grid',
+            headStyles: { fillColor: this.colors.header, textColor: 255, fontSize: 8 },
+            bodyStyles: { fontSize: 8, textColor: this.colors.text },
+            alternateRowStyles: { fillColor: this.colors.rowEven },
+            margin: { top: 25 }
+        });
+    } else {
+        // Mensagem de relatório simples
+        doc.setFontSize(10);
+        doc.setTextColor(100, 100, 100);
+        doc.text("Este é um relatório sintético. Para ver detalhes por OS, gere o relatório Analítico.", 14, currentY + 10);
+    }
+
+    doc.save(`Relatorio_Validacao_${tipo}_${new Date().toISOString().slice(0,10)}.pdf`);
+  },
+
+  drawCard(doc, x, y, w, title, value, subtext, colorInfo) {
+      // Border Left Color
+      doc.setDrawColor(230, 230, 230);
+      doc.setFillColor(250, 250, 250);
+      doc.roundedRect(x, y, w, 28, 2, 2, 'FD');
+      
+      // Color Strip
+      doc.setFillColor(...colorInfo);
+      doc.rect(x, y, 1.5, 28, 'F');
+
+      // Text
+      doc.setFontSize(8);
+      doc.setTextColor(100, 100, 100);
+      doc.text(title.toUpperCase(), x + 4, y + 6);
+
+      doc.setFontSize(12);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(30, 41, 59);
+      doc.text(value, x + 4, y + 14);
+
+      doc.setFontSize(7);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(150, 150, 150);
+      doc.text(subtext, x + 4, y + 22);
   }
 };
 </script>
