@@ -1,15 +1,15 @@
 <script>
   /**
    * SERVIÇO DE MACHINE LEARNING HÍBRIDO (Regras + Naive Bayes)
-   * 1. Verifica regras determinísticas ("Pesos").
-   * 2. Se não houver regra, usa IA probabilística (com restrições de categoria).
+   * Ajustado para dar peso a componentes críticos (CPU, GPU, MOBO).
    */
 window.MLService = {
   // Configurações
   config: {
     synonyms: {
-      'vga': 'gpu', 'placa_video': 'gpu', 'video': 'gpu',
-      'mobo': 'placamae', 'placa_mae': 'placamae', 'motherboard': 'placamae', 'mb': 'placamae',
+      'vga': 'gpu', 'placa_video': 'gpu', 'video': 'gpu', 'rtx': 'gpu', 'gtx': 'gpu', 'radeon': 'gpu', 'geforce': 'gpu',
+      'mobo': 'placamae', 'placa_mae': 'placamae', 'motherboard': 'placamae', 'mb': 'placamae', 'mainboard': 'placamae',
+      'processador': 'cpu', 'intel': 'cpu', 'amd': 'cpu', 'ryzen': 'cpu', 'core': 'cpu', 'athlon': 'cpu',
       'memoria': 'ram', 'memorias': 'ram', 'pente': 'ram',
       'hdd': 'disco', 'ssd': 'disco', 'nvme': 'disco',
       'fonte': 'psu',
@@ -20,13 +20,17 @@ window.MLService = {
       'travando': 'falha_funcional', 'artefato': 'falha_funcional', 'azul': 'falha_funcional'
     },
     
+    // Features que multiplicam o peso da evidência (importantes para a regra de negócio)
     importantFeatures: new Set([
         'incompatibilidade', 'nao_suporta', 'nao_cabe', 
-        'dano_fisico', 'amassado', 'quebrado', 
-        'ram', 'tela_azul', 'curto', 'queimado'
+        'dano_fisico', 'amassado', 'quebrado', 'oxidacao',
+        'ram', 'tela_azul', 'curto', 'queimado',
+        // Adicionados como PESO IMPORTANTE devido à regra de negócio e valor agregado
+        'gpu', 'cpu', 'placamae' 
     ]),
     
-    minWordFrequency: 2 
+    minWordFrequency: 2,
+    confidenceThreshold: 1.5 
   },
 
   model: {
@@ -72,37 +76,42 @@ window.MLService = {
 
       const tempWordCounts = {}; 
 
-      // Mapeamento: Nome no CSV -> Nome que o Sistema quer
+      // Mapeamento: Texto Humano -> Chave do Sistema
       const labelMap = {
-          'aprovado pagamento': 'Pagar',
-          'reprovado pagamento': 'Reprovado',
-          'avaria customiza': 'Parceiro',
-          // Caso venham nomes misturados
-          'pagar': 'Pagar',
-          'reprovado': 'Reprovado',
-          'parceiro': 'Parceiro'
+          'aprovado pagamento': 'ok_pagamento',
+          'pagar': 'ok_pagamento',
+          'ok_pagamento': 'ok_pagamento',
+          'ok': 'ok_pagamento',
+
+          'reprovado pagamento': 'nao_pagar',
+          'reprovado': 'nao_pagar',
+          'nao_pagar': 'nao_pagar',
+          'não pagar': 'nao_pagar',
+
+          'avaria customiza': 'avaria_parceiro',
+          'parceiro': 'avaria_parceiro',
+          'avaria_parceiro': 'avaria_parceiro',
+          'avaria': 'avaria_parceiro'
       };
 
       dataset.forEach(originalItem => {
         const item = { ...originalItem };
         
-        // Normalização dos campos de regra
+        // Verifica regras hardcoded nos dados históricos para garantir pureza
         const processo = (item.processo || item['Processo?'] || '').toString().toLowerCase();
         const avaria = (item.avariaCust || item['Avaria customiza?'] || '').toString().toLowerCase();
         let rawCat = (item.categoria || item.Considerações || '').toString().toLowerCase().trim();
 
-        // --- 1. HIGIENIZAÇÃO DE REGRAS (Prioridade Total) ---
         if (processo.includes('antes')) {
-            rawCat = 'reprovado'; // Força Reprovado
+            rawCat = 'nao_pagar'; 
         } else if (avaria.includes('sim')) {
-            rawCat = 'parceiro';  // Força Parceiro
+            rawCat = 'avaria_parceiro';
         }
 
-        // --- 2. TRADUÇÃO PARA OS NOMES FINAIS ---
-        // Converte "Aprovado Pagamento" -> "Pagar", etc.
-        const finalCat = labelMap[rawCat] || rawCat; // Se não achar no mapa, usa o original
+        const finalCat = labelMap[rawCat];
         
-        if (!finalCat) return;
+        // Ignora categorias desconhecidas ou 'indefinido'
+        if (!finalCat || finalCat === 'indefinido') return;
 
         if(!this.categories[finalCat]) {
             this.categories[finalCat] = { docCount: 0, wordCounts: {}, totalWords: 0 };
@@ -117,6 +126,7 @@ window.MLService = {
         tokens.forEach(token => {
            tempWordCounts[token] = (tempWordCounts[token] || 0) + 1;
            let weight = 1;
+           // Aplica peso x4 se for uma feature importante (incluindo agora CPU, GPU, MOBO)
            if (window.MLService.config.importantFeatures.has(token)) weight = 4;
 
            if(!this.categories[finalCat].wordCounts[token]) this.categories[finalCat].wordCounts[token] = 0;
@@ -125,7 +135,7 @@ window.MLService = {
         });
       });
 
-      // Limpeza de Ruído
+      // Limpeza de Ruído (palavras muito raras)
       const minFreq = window.MLService.config.minWordFrequency;
       Object.keys(this.categories).forEach(cat => {
           const catData = this.categories[cat];
@@ -138,13 +148,13 @@ window.MLService = {
               this.globalVocabulary.add(token);
           });
       });
-      console.log(`ML Treinado. Classes: ${Object.keys(this.categories).join(', ')}`);
+      console.log(`ML Treinado. Classes Ativas: ${Object.keys(this.categories).join(', ')}`);
     },
     
     classify(text, forbiddenCategories = []) {
-      if (!text || this.docCount === 0) return null;
+      if (!text || this.docCount === 0) return 'indefinido';
       const tokens = this.tokenizer.tokenize(text);
-      if (tokens.length === 0) return null;
+      if (tokens.length === 0) return 'indefinido';
 
       let bestCategory = null;
       let maxProb = -Infinity;
@@ -155,11 +165,14 @@ window.MLService = {
         if (forbiddenCategories.includes(catName)) return;
 
         const catData = this.categories[catName];
+        // Probabilidade a priori (Prior)
         let logProb = Math.log(catData.docCount / this.docCount);
         
+        // Probabilidade das evidências (Likelihood)
         tokens.forEach(token => {
           if (!this.globalVocabulary.has(token)) return; 
           const wordCount = catData.wordCounts[token] || 0;
+          // Laplace Smoothing (+1)
           const pWord = (wordCount + 1) / (catData.totalWords + vocabSize + 1);
           logProb += Math.log(pWord);
         });
@@ -173,9 +186,12 @@ window.MLService = {
         }
       });
       
-      const confidenceGap = maxProb - secondMaxProb;
-      if (confidenceGap < 0.5) return 'indefinido';
-      return bestCategory;
+      const gap = maxProb - secondMaxProb;
+      if (isNaN(gap) || gap < window.MLService.config.confidenceThreshold) {
+          return 'indefinido';
+      }
+      
+      return bestCategory || 'indefinido';
     }
   },
 
@@ -184,22 +200,20 @@ window.MLService = {
   predict(text, context) {
       let forbidden = [];
       
-      // --- REGRAS RÍGIDAS (Retornam os nomes corretos) ---
+      // REGRAS RÍGIDAS DE NEGÓCIO (Sobrepõem a IA)
       if (context) {
           const avaria = (context.avariaCust || context['Avaria customiza?'] || '').toString().trim().toLowerCase();
           const processo = (context.processo || context['Processo?'] || '').toString().trim().toLowerCase();
 
-          // 1. Avaria Parceiro (Sim) -> "Parceiro"
-          if (avaria.includes('sim')) return 'Parceiro';
-          
-          // Se não é Parceiro, remove essa opção da IA
-          forbidden.push('Parceiro'); 
+          // 1. Avaria Parceiro (Sim) -> SEMPRE "avaria_parceiro"
+          if (avaria.includes('sim')) return 'avaria_parceiro';
+          forbidden.push('avaria_parceiro'); 
 
-          // 2. Erro antes da montagem -> "Reprovado"
-          if (processo.includes('antes')) return 'Reprovado';
+          // 2. Erro antes da montagem -> SEMPRE "nao_pagar"
+          if (processo.includes('antes')) return 'nao_pagar';
       }
 
-      // IA decide entre "Pagar" ou "Reprovado"
+      // Se não caiu nas regras rígidas, a IA decide baseada no texto
       return this.model.classify(text, forbidden);
   }
 };
