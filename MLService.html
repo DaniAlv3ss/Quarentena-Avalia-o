@@ -4,116 +4,203 @@
    * 1. Verifica regras determinísticas ("Pesos").
    * 2. Se não houver regra, usa IA probabilística (com restrições de categoria).
    */
-  window.MLService = {
-    model: {
-      tokenizer: {
-        stopWords: new Set(['o','a','os','as','um','uma','de','do','da','em','no','na','por','pelo','pela','para','com','e','ou','que','seu','sua','ao','aos','sim','nao','ser','estar','ter','haver','foi']),
-        stem(word) {
-          if (!word || word.length < 4) return word;
-          return word.replace(/(?:(s|es|a|o|am|em|indo|endo|ando|ada|ado|aram|iram))$/, '');
-        },
-        tokenize(text) {
-          if (!text) return [];
-          return text.toString().toLowerCase()
-            .replace(/[^\w\s\u00C0-\u00FF]/gi, ' ')
-            .split(/\s+/)
-            .filter(w => w.length > 2 && !this.stopWords.has(w))
-            .map(w => this.stem(w));
+window.MLService = {
+  // Configurações
+  config: {
+    synonyms: {
+      'vga': 'gpu', 'placa_video': 'gpu', 'video': 'gpu',
+      'mobo': 'placamae', 'placa_mae': 'placamae', 'motherboard': 'placamae', 'mb': 'placamae',
+      'memoria': 'ram', 'memorias': 'ram', 'pente': 'ram',
+      'hdd': 'disco', 'ssd': 'disco', 'nvme': 'disco',
+      'fonte': 'psu',
+      'cooler': 'refrigeracao', 'fan': 'refrigeracao', 'ventoinha': 'refrigeracao', 'water': 'refrigeracao', 'wc': 'refrigeracao', 'bomba': 'refrigeracao',
+      
+      'quebrado': 'dano_fisico', 'amassado': 'dano_fisico', 'trincado': 'dano_fisico', 'entortado': 'dano_fisico', 'torto': 'dano_fisico',
+      'incompativel': 'incompatibilidade', 'pequeno': 'incompatibilidade', 'cabe': 'incompatibilidade', 'suporta': 'incompatibilidade',
+      'travando': 'falha_funcional', 'artefato': 'falha_funcional', 'azul': 'falha_funcional'
+    },
+    
+    importantFeatures: new Set([
+        'incompatibilidade', 'nao_suporta', 'nao_cabe', 
+        'dano_fisico', 'amassado', 'quebrado', 
+        'ram', 'tela_azul', 'curto', 'queimado'
+    ]),
+    
+    minWordFrequency: 2 
+  },
+
+  model: {
+    globalVocabulary: new Set(),
+    categories: {},
+    docCount: 0,
+    
+    tokenizer: {
+      stopWords: new Set(['o','a','os','as','um','uma','de','do','da','em','no','na','por','pelo','pela','para','com','e','ou','que','seu','sua','ao','aos','foi','veio','esta','estava','ficou','tem','sendo']),
+      
+      stem(word) {
+        if (!word || word.length < 4) return word;
+        return word.replace(/(?:(s|es|a|o|am|em|indo|endo|ando|ada|ado|aram|iram))$/, '');
+      },
+      
+      tokenize(text) {
+        if (!text) return [];
+        let rawWords = text.toString().toLowerCase()
+          .replace(/[^\w\s\u00C0-\u00FF]/gi, ' ') 
+          .split(/\s+/)
+          .filter(w => w.length > 2 && !this.stopWords.has(w));
+
+        rawWords = rawWords.map(w => window.MLService.config.synonyms[w] || w);
+        const stems = rawWords.map(w => this.stem(w));
+
+        const bigrams = [];
+        for (let i = 0; i < stems.length - 1; i++) {
+           bigrams.push(stems[i] + "_" + stems[i+1]);
         }
-      },
-      // Estado do Modelo
-      categories: {},
-      docCount: 0,
-      
-      reset() {
-        this.categories = {};
-        this.docCount = 0;
-      },
-      
-      train(dataset) {
-        this.reset();
-        if(!dataset || dataset.length === 0) return;
-
-        dataset.forEach(item => {
-          const cat = item.categoria;
-          if(!this.categories[cat]) this.categories[cat] = { docCount: 0, wordCounts: {}, totalWords: 0 };
-          
-          this.categories[cat].docCount++;
-          this.docCount++;
-          
-          const tokens = this.tokenizer.tokenize(item.texto);
-          tokens.forEach(token => {
-            if(!this.categories[cat].wordCounts[token]) this.categories[cat].wordCounts[token] = 0;
-            this.categories[cat].wordCounts[token]++;
-            this.categories[cat].totalWords++;
-          });
-        });
-        console.log("ML Treinado com " + this.docCount + " exemplos.");
-      },
-      
-      // Agora aceita uma lista de categorias proibidas
-      classify(text, forbiddenCategories = []) {
-        if (!text || this.docCount === 0) return null;
-        const tokens = this.tokenizer.tokenize(text);
-        if (tokens.length === 0) return null;
-
-        let bestCategory = null;
-        let maxProb = -Infinity;
-        
-        Object.keys(this.categories).forEach(catName => {
-          // Se a categoria estiver na lista de proibidas, pula a verificação
-          if (forbiddenCategories.includes(catName)) return;
-
-          const catData = this.categories[catName];
-          let logProb = Math.log(catData.docCount / this.docCount);
-          
-          tokens.forEach(token => {
-            const wordCount = catData.wordCounts[token] || 0;
-            const pWord = (wordCount + 1) / (catData.totalWords + Object.keys(catData.wordCounts).length + 1);
-            logProb += Math.log(pWord);
-          });
-          
-          if (logProb > maxProb) {
-            maxProb = logProb;
-            bestCategory = catName;
-          }
-        });
-        
-        return bestCategory;
+        return [...stems, ...bigrams];
       }
     },
 
-    // Interface pública simplificada
-    train(data) { this.model.train(data); },
+    reset() {
+      this.categories = {};
+      this.globalVocabulary = new Set();
+      this.docCount = 0;
+    },
     
-    predict(text, context) {
-        let forbidden = [];
+    train(dataset) {
+      this.reset();
+      if(!dataset || dataset.length === 0) return;
 
-        // --- LÓGICA DE PESOS / REGRAS DE NEGÓCIO ---
-        if (context) {
-            const avaria = (context.avariaCust || '').toString().trim().toLowerCase();
-            const processo = (context.processo || '').toString().trim().toLowerCase();
+      const tempWordCounts = {}; 
 
-            // REGRA 1 (MANDATÓRIA): Se houver QUALQUER "sim" na string de avaria, É PARCEIRO.
-            // Isso cobre casos onde há múltiplos registros ("Não Sim Não") para a mesma OS.
-            if (avaria.includes('sim')) {
-                return 'avaria_parceiro';
-            }
+      // Mapeamento: Nome no CSV -> Nome que o Sistema quer
+      const labelMap = {
+          'aprovado pagamento': 'Pagar',
+          'reprovado pagamento': 'Reprovado',
+          'avaria customiza': 'Parceiro',
+          // Caso venham nomes misturados
+          'pagar': 'Pagar',
+          'reprovado': 'Reprovado',
+          'parceiro': 'Parceiro'
+      };
 
-            // REGRA 2: Se NÃO tem "sim", PROÍBE "Parceiro".
-            // Isso obriga a IA a escolher entre as outras opções (Pagar ou Reprovado).
-            if (!avaria.includes('sim')) {
-                forbidden.push('avaria_parceiro');
-            }
+      dataset.forEach(originalItem => {
+        const item = { ...originalItem };
+        
+        // Normalização dos campos de regra
+        const processo = (item.processo || item['Processo?'] || '').toString().toLowerCase();
+        const avaria = (item.avariaCust || item['Avaria customiza?'] || '').toString().toLowerCase();
+        let rawCat = (item.categoria || item.Considerações || '').toString().toLowerCase().trim();
 
-            // REGRA 3: Processo anterior à montagem -> Reprovado
-            if (processo.includes('antes')) {
-                return 'nao_pagar';
-            }
+        // --- 1. HIGIENIZAÇÃO DE REGRAS (Prioridade Total) ---
+        if (processo.includes('antes')) {
+            rawCat = 'reprovado'; // Força Reprovado
+        } else if (avaria.includes('sim')) {
+            rawCat = 'parceiro';  // Força Parceiro
         }
 
-        // Usa a IA Estatística passando a lista de categorias proibidas
-        return this.model.classify(text, forbidden);
+        // --- 2. TRADUÇÃO PARA OS NOMES FINAIS ---
+        // Converte "Aprovado Pagamento" -> "Pagar", etc.
+        const finalCat = labelMap[rawCat] || rawCat; // Se não achar no mapa, usa o original
+        
+        if (!finalCat) return;
+
+        if(!this.categories[finalCat]) {
+            this.categories[finalCat] = { docCount: 0, wordCounts: {}, totalWords: 0 };
+        }
+        
+        this.categories[finalCat].docCount++;
+        this.docCount++;
+        
+        const textToLearn = item.texto || item['Detalhe o problema encontrado'];
+        const tokens = this.tokenizer.tokenize(textToLearn);
+        
+        tokens.forEach(token => {
+           tempWordCounts[token] = (tempWordCounts[token] || 0) + 1;
+           let weight = 1;
+           if (window.MLService.config.importantFeatures.has(token)) weight = 4;
+
+           if(!this.categories[finalCat].wordCounts[token]) this.categories[finalCat].wordCounts[token] = 0;
+           this.categories[finalCat].wordCounts[token] += weight;
+           this.categories[finalCat].totalWords += weight;
+        });
+      });
+
+      // Limpeza de Ruído
+      const minFreq = window.MLService.config.minWordFrequency;
+      Object.keys(this.categories).forEach(cat => {
+          const catData = this.categories[cat];
+          Object.keys(catData.wordCounts).forEach(token => {
+              if (tempWordCounts[token] < minFreq && !window.MLService.config.importantFeatures.has(token)) {
+                  catData.totalWords -= catData.wordCounts[token];
+                  delete catData.wordCounts[token];
+                  return;
+              }
+              this.globalVocabulary.add(token);
+          });
+      });
+      console.log(`ML Treinado. Classes: ${Object.keys(this.categories).join(', ')}`);
+    },
+    
+    classify(text, forbiddenCategories = []) {
+      if (!text || this.docCount === 0) return null;
+      const tokens = this.tokenizer.tokenize(text);
+      if (tokens.length === 0) return null;
+
+      let bestCategory = null;
+      let maxProb = -Infinity;
+      let secondMaxProb = -Infinity; 
+      const vocabSize = this.globalVocabulary.size;
+
+      Object.keys(this.categories).forEach(catName => {
+        if (forbiddenCategories.includes(catName)) return;
+
+        const catData = this.categories[catName];
+        let logProb = Math.log(catData.docCount / this.docCount);
+        
+        tokens.forEach(token => {
+          if (!this.globalVocabulary.has(token)) return; 
+          const wordCount = catData.wordCounts[token] || 0;
+          const pWord = (wordCount + 1) / (catData.totalWords + vocabSize + 1);
+          logProb += Math.log(pWord);
+        });
+        
+        if (logProb > maxProb) {
+          secondMaxProb = maxProb;
+          maxProb = logProb;
+          bestCategory = catName;
+        } else if (logProb > secondMaxProb) {
+          secondMaxProb = logProb;
+        }
+      });
+      
+      const confidenceGap = maxProb - secondMaxProb;
+      if (confidenceGap < 0.5) return 'indefinido';
+      return bestCategory;
     }
-  };
+  },
+
+  train(data) { this.model.train(data); },
+  
+  predict(text, context) {
+      let forbidden = [];
+      
+      // --- REGRAS RÍGIDAS (Retornam os nomes corretos) ---
+      if (context) {
+          const avaria = (context.avariaCust || context['Avaria customiza?'] || '').toString().trim().toLowerCase();
+          const processo = (context.processo || context['Processo?'] || '').toString().trim().toLowerCase();
+
+          // 1. Avaria Parceiro (Sim) -> "Parceiro"
+          if (avaria.includes('sim')) return 'Parceiro';
+          
+          // Se não é Parceiro, remove essa opção da IA
+          forbidden.push('Parceiro'); 
+
+          // 2. Erro antes da montagem -> "Reprovado"
+          if (processo.includes('antes')) return 'Reprovado';
+      }
+
+      // IA decide entre "Pagar" ou "Reprovado"
+      return this.model.classify(text, forbidden);
+  }
+};
 </script>
