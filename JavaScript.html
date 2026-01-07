@@ -19,7 +19,7 @@
       'QUAL PROBLEMA?': 'Tela Defeito', 'DETALHE O PROBLEMA ENCONTRADO': 'Trincou',
       '_idx_processo': 'Troca', 'FOTO DA AVARIA!': 'http://google.com',
       'CF PRODUTO ANTIGO': '12345', 'CF PRODUTO NOVO': '67890',
-      _custoAntigo: 150.50, _custoNovo: 200.00, _custoTotal: 350.50
+      _custoAntigo: 150.50, _custoNovo: 200.00, _custoTotal: 200.00
     }))), 500)),
     buscarDadosPorPeriodo: (i, f) => new Promise(r => setTimeout(() => r([]), 1000)),
     listarSessoesSalvas: () => Promise.resolve(['Auditoria 01/05']),
@@ -397,7 +397,15 @@
 
               return { 
                 id: i + 1, problema: prob, detalhe: det, custo: cTotal,
-                processo: r['_idx_processo'], os: osKey, inicio: r['_idx_inicio'], fim: r['_idx_fim'],
+                processo: r['_idx_processo'], os: osKey,
+                
+                // ALTERAÇÃO: Adicionando dados individuais dos CFs e valores
+                cfAntigo: r['CF PRODUTO ANTIGO'],
+                cfNovo: r['CF PRODUTO NOVO'],
+                vlrAntigo: parseFloat(r._custoAntigo)||0,
+                vlrNovo: parseFloat(r._custoNovo)||0,
+                
+                inicio: r['_idx_inicio'], fim: r['_idx_fim'],
                 pedido: r['_idx_pedido'], produtoDiv: r['_idx_prod_div'],
                 tipoProb: r['_idx_tipo_problema'] || r['_idx_tipo_troca'], 
                 tipoTroca: r['_idx_tipo_troca'], avariaCust: r['_idx_avaria_cust']
@@ -470,20 +478,32 @@
         const oldStatus = item._status;
         item._status = decision;
         
-        // APRENDIZADO ONLINE (Somente detalhe para evitar sujeira)
+        // APRENDIZADO ONLINE (Ajustado)
+        // Agora envia APENAS a ÚLTIMA ocorrência (mais recente) e o objeto completo
         if (learn && item._subRecords && item._subRecords.length > 0) {
-            const sentTexts = new Set(); 
-            item._subRecords.forEach(sub => {
-                let textoLimpo = (sub.detalhe || '').trim();
-                if (textoLimpo.length < 4) textoLimpo = (sub.problema || '').trim();
+            // Pega a ÚLTIMA ocorrência (assumindo que o array venha em ordem cronológica ou de planilha)
+            const lastSub = item._subRecords[item._subRecords.length - 1];
+            
+            // Verifica validade mínima do texto
+            let textoLimpo = (lastSub.detalhe || '').trim();
+            if (textoLimpo.length < 4) textoLimpo = (lastSub.problema || '').trim();
 
-                if (textoLimpo.length > 4 && 
-                    !textoLimpo.includes('DADOS NÃO LOCALIZADOS') &&
-                    !sentTexts.has(textoLimpo)) {
-                    runGoogle('salvarAprendizado', textoLimpo, decision);
-                    sentTexts.add(textoLimpo);
-                }
-            });
+            if (textoLimpo.length > 4 && 
+                !textoLimpo.includes('DADOS NÃO LOCALIZADOS')) {
+                
+                const payload = {
+                    os: item.OS,
+                    dataInicio: lastSub.inicio, // Vem do _idx_inicio
+                    avariaCust: lastSub.avariaCust,
+                    processo: lastSub.processo,
+                    motivo: lastSub.problema,
+                    detalhe: lastSub.detalhe,
+                    decisao: decision,
+                    custoNovo: lastSub.vlrNovo
+                };
+                
+                runGoogle('salvarAprendizado', payload);
+            }
         }
         
         if(currentView.value === 'dashboard') updateCharts();
