@@ -214,23 +214,58 @@ function salvarSessaoNaPlanilha(nomeSessao, dados, isUpdate) {
   return { success: true, nomeAba: nomeSessao };
 }
 
-// Mantido para compatibilidade, mas não usado pelo novo modelo Bayesiano
-function salvarAprendizado(texto, decisao) {
-  // Implementação opcional: você pode querer salvar novos casos na planilha de treino para ela crescer
+// --- FUNÇÃO AJUSTADA PARA O NOVO FORMATO DE TREINAMENTO ---
+function salvarAprendizado(dados) {
+  // dados = { os, dataInicio, avariaCust, processo, motivo, detalhe, decisao, custoNovo }
   try {
     const ss = SpreadsheetApp.openById(CONFIG.ID_PLANILHA_TREINO);
     const aba = ss.getSheetByName(CONFIG.NOME_ABA_TREINO);
+    
     if(aba) {
-      // Adiciona no final simulando a estrutura: OS(vazia), Data, Avaria(vazia), Processo(vazia), Motivo(texto), Detalhe(vazia), Considerações(decisão)
-      // Ajustando labels inversos para salvar legível
+      // Mapeamento de decisão (Sistema -> Humano)
       let labelHumano = 'Em Análise';
-      if(decisao === 'ok_pagamento') labelHumano = 'Aprovado Pagamento';
-      if(decisao === 'nao_pagar') labelHumano = 'Reprovado Pagamento';
-      if(decisao === 'avaria_parceiro') labelHumano = 'Avaria Parceiro';
+      if(dados.decisao === 'ok_pagamento') labelHumano = 'Aprovado Pagamento';
+      if(dados.decisao === 'nao_pagar') labelHumano = 'Reprovado Pagamento';
+      if(dados.decisao === 'avaria_parceiro') labelHumano = 'Avaria Parceiro';
       
-      aba.appendRow(['AUTO', new Date(), '-', '-', texto, '-', labelHumano, 0]);
+      // Formata custo para R$ se for numérico
+      // Se preferir salvar como número puro no Excel e formatar a coluna lá, apenas salve dados.custoNovo
+      const valorFormatado = dados.custoNovo 
+        ? parseFloat(dados.custoNovo) 
+        : 0;
+
+      // ESTRUTURA SOLICITADA:
+      // A: Número OS
+      // B: Data Início Montagem
+      // C: Avaria customiza?
+      // D: Processo?
+      // E: Motivos
+      // F: Detalhe o problema encontrado
+      // G: Considerações
+      // H: Custo CF Novo
+      
+      const novaLinha = [
+        dados.os || '',
+        dados.dataInicio || '', // Salva string como vem (DD/MM/YYYY) ou Date object
+        dados.avariaCust || '',
+        dados.processo || '',
+        dados.motivo || '',
+        dados.detalhe || '',
+        labelHumano,
+        valorFormatado
+      ];
+      
+      aba.appendRow(novaLinha);
+      
+      // Opcional: Formatar a última célula adicionada como Moeda
+      const lastRow = aba.getLastRow();
+      if(lastRow > 0) {
+         aba.getRange(lastRow, 8).setNumberFormat("R$ #,##0.00");
+      }
     }
-  } catch(e) {}
+  } catch(e) {
+    console.error("Erro ao salvar aprendizado: " + e);
+  }
 }
 
 // --- HELPERS (LEITURA CRÍTICA) ---
@@ -318,7 +353,8 @@ function enriquecerComCustos(dados, dadosProdutos) {
     
     row._custoAntigo = pAnt.preco;
     row._custoNovo = pNov.preco;
-    row._custoTotal = pAnt.preco + pNov.preco;
+    // ALTERAÇÃO: Soma apenas o valor do produto NOVO no custo total da troca
+    row._custoTotal = pNov.preco; 
   });
   return dados;
 }
