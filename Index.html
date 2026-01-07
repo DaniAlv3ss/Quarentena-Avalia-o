@@ -3,7 +3,7 @@
 <head>
   <base target="_top">
   <meta charset="UTF-8">
-  <title>Auditor Pro</title>
+  <title>Validação de Quarentena</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <!-- CDNs -->
@@ -20,8 +20,8 @@
   <?!= include('Styles'); ?>
   <!-- INCLUSÃO Lógica ML -->
   <?!= include('MLService'); ?>
-  <!-- INCLUSÃO REPORTS -->
-  <?!= include('ReportsJS'); ?>
+  <!-- INCLUSÃO REPORTS (Nome corrigido para singular) -->
+  <?!= include('ReportJS'); ?>
 
 </head>
 <body class="h-screen overflow-hidden flex font-sans antialiased bg-slate-50">
@@ -39,23 +39,68 @@
       </transition-group>
     </div>
 
-    <!-- BULK ACTIONS -->
-    <transition name="slide-up">
-      <div v-if="(selectedRows || []).length > 0" class="fixed bottom-8 left-1/2 -translate-x-1/2 z-[90] bg-white text-slate-800 px-2 py-2 rounded-2xl shadow-2xl flex items-center gap-4 border border-slate-200 ring-1 ring-slate-900/5">
-        <div class="flex items-center gap-3 px-4 border-r border-slate-100">
-          <span class="bg-brand-600 text-white text-xs font-bold px-2.5 py-1 rounded-md">{{ (selectedRows || []).length }}</span>
-          <span class="text-sm font-semibold text-slate-600">Selecionados</span>
+    <!-- MODAL DE EXPORTAÇÃO PDF -->
+    <transition name="fade">
+      <div v-if="exportModal.show && exportModal.type === 'pdf'" class="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+        <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-slide-up border border-slate-100">
+          <h3 class="text-xl font-bold text-slate-800 mb-2 flex items-center gap-2"><i class="fa-solid fa-file-pdf text-red-600"></i> Exportar Relatório</h3>
+          <p class="text-slate-500 text-sm mb-6">Escolha o nível de detalhe do documento.</p>
+          
+          <div class="space-y-3">
+            <button @click="generatePdf('simples')" class="w-full p-4 rounded-xl border border-slate-200 hover:border-brand-500 hover:bg-brand-50 hover:shadow-md transition-all flex items-center gap-4 group text-left">
+               <div class="w-10 h-10 rounded-full bg-slate-100 text-slate-500 flex items-center justify-center group-hover:bg-brand-500 group-hover:text-white transition-colors"><i class="fa-solid fa-chart-pie"></i></div>
+               <div>
+                 <h4 class="font-bold text-slate-700 group-hover:text-brand-700">Relatório Sintético</h4>
+                 <p class="text-xs text-slate-400">Apenas cards financeiros, totais e custos de montagem.</p>
+               </div>
+            </button>
+
+            <button @click="generatePdf('completo')" class="w-full p-4 rounded-xl border border-slate-200 hover:border-brand-500 hover:bg-brand-50 hover:shadow-md transition-all flex items-center gap-4 group text-left">
+               <div class="w-10 h-10 rounded-full bg-slate-100 text-slate-500 flex items-center justify-center group-hover:bg-brand-500 group-hover:text-white transition-colors"><i class="fa-solid fa-list-check"></i></div>
+               <div>
+                 <h4 class="font-bold text-slate-700 group-hover:text-brand-700">Relatório Analítico</h4>
+                 <p class="text-xs text-slate-400">Inclui lista detalhada de todas as máquinas e decisões.</p>
+               </div>
+            </button>
+          </div>
+
+          <div class="mt-6 text-right">
+            <button @click="closeExportModal" class="text-slate-400 hover:text-slate-600 text-sm font-bold">Cancelar</button>
+          </div>
         </div>
-        <div class="flex gap-2">
-          <button @click="bulkDecide('ok_pagamento')" class="group relative px-4 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl transition-all font-bold text-xs flex items-center gap-2"><i class="fa-solid fa-check"></i> Pagar</button>
-          <button @click="bulkDecide('avaria_parceiro')" class="group relative px-4 py-2 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-xl transition-all font-bold text-xs flex items-center gap-2"><i class="fa-solid fa-triangle-exclamation"></i> Avariado</button>
-          <button @click="bulkDecide('nao_pagar')" class="group relative px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl transition-all font-bold text-xs flex items-center gap-2"><i class="fa-solid fa-xmark"></i> Reprovar</button>
-        </div>
-        <button @click="selectedRows = []" class="px-3 text-slate-400 hover:text-slate-600 transition-colors"><i class="fa-solid fa-times"></i></button>
       </div>
     </transition>
 
-    <!-- MODALS (CF, Occurrence, General) -->
+    <!-- MODAL DE EXPORTAÇÃO CSV -->
+    <transition name="fade">
+      <div v-if="exportModal.show && exportModal.type === 'csv'" class="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+        <div class="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-0 animate-slide-up border border-slate-100 overflow-hidden flex flex-col max-h-[80vh]">
+          <div class="p-6 border-b border-slate-100">
+            <h3 class="text-xl font-bold text-slate-800 flex items-center gap-2"><i class="fa-solid fa-file-csv text-emerald-600"></i> Personalizar CSV</h3>
+            <p class="text-slate-500 text-sm mt-1">Selecione as colunas para o arquivo.</p>
+          </div>
+          
+          <div class="p-6 overflow-y-auto custom-scrollbar flex-1">
+             <div class="flex justify-between mb-3">
+               <button @click="toggleAllCsvColumns(true)" class="text-xs font-bold text-brand-600 hover:underline">Marcar Todos</button>
+               <button @click="toggleAllCsvColumns(false)" class="text-xs font-bold text-slate-400 hover:underline">Desmarcar Todos</button>
+             </div>
+             <div class="grid grid-cols-2 gap-3">
+                <label v-for="col in csvColumns" :key="col" class="flex items-center gap-2 p-2 rounded hover:bg-slate-50 cursor-pointer border border-transparent hover:border-slate-100 transition-all">
+                   <input type="checkbox" :value="col" v-model="selectedCsvColumns" class="w-4 h-4 text-brand-600 rounded border-slate-300 focus:ring-brand-500">
+                   <span class="text-sm text-slate-600 truncate" :title="col">{{ col }}</span>
+                </label>
+             </div>
+          </div>
+
+          <div class="p-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+            <button @click="closeExportModal" class="px-4 py-2 rounded-lg text-slate-500 font-bold text-sm hover:bg-white transition-colors">Cancelar</button>
+            <button @click="generateCsv" class="px-6 py-2 rounded-lg bg-emerald-600 text-white font-bold text-sm hover:bg-emerald-700 shadow-md transition-all flex items-center gap-2"><i class="fa-solid fa-download"></i> Baixar CSV</button>
+          </div>
+        </div>
+      </div>
+    </transition>
+
     <!-- CF DETAILS MODAL -->
     <transition name="fade">
       <div v-if="cfModal.show && cfModal.item" class="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
@@ -69,63 +114,34 @@
           
           <!-- Corpo com Scroll -->
           <div class="p-6 space-y-4 overflow-y-auto custom-scrollbar">
-            
             <!-- Loop por Ocorrências -->
             <div v-for="(sub, idx) in cfModal.item._subRecords" :key="idx" class="p-4 bg-slate-50 rounded-2xl border border-slate-200 relative hover:border-brand-200 transition-colors">
                <div class="flex justify-between items-center mb-3">
                  <span class="text-[10px] font-bold text-slate-400 bg-white px-2 py-0.5 rounded border border-slate-100">Ocorrência #{{ idx + 1 }}</span>
                  <span class="text-[10px] font-bold text-slate-400 truncate max-w-[150px]">{{ sub.problema }}</span>
                </div>
-               
                <!-- Visualização da Troca -->
                <div class="flex items-center gap-2 justify-between mb-3 bg-white p-3 rounded-xl border border-dashed border-slate-200">
-                  <!-- Antigo -->
-                  <div class="flex-1 min-w-0 text-left">
-                      <p class="text-[9px] font-bold text-slate-400 uppercase mb-0.5">CF Antigo</p>
-                      <p class="font-mono text-xs font-bold text-slate-600 truncate" :title="sub.cfAntigo">{{ sub.cfAntigo || 'N/A' }}</p>
-                  </div>
-                  
-                  <!-- Seta Visual -->
-                  <div class="px-2 text-slate-300 flex flex-col items-center">
-                    <span class="text-[9px] font-bold text-slate-300 uppercase mb-0.5">Troca</span>
-                    <i class="fa-solid fa-arrow-right-long text-brand-500"></i>
-                  </div>
-                  
-                  <!-- Novo -->
-                  <div class="flex-1 min-w-0 text-right">
-                      <p class="text-[9px] font-bold text-brand-500 uppercase mb-0.5">CF Novo</p>
-                      <p class="font-mono text-xs font-bold text-brand-700 truncate" :title="sub.cfNovo">{{ sub.cfNovo || 'N/A' }}</p>
-                  </div>
+                  <div class="flex-1 min-w-0 text-left"><p class="text-[9px] font-bold text-slate-400 uppercase mb-0.5">CF Antigo</p><p class="font-mono text-xs font-bold text-slate-600 truncate" :title="sub.cfAntigo">{{ sub.cfAntigo || 'N/A' }}</p></div>
+                  <div class="px-2 text-slate-300 flex flex-col items-center"><span class="text-[9px] font-bold text-slate-300 uppercase mb-0.5">Troca</span><i class="fa-solid fa-arrow-right-long text-brand-500"></i></div>
+                  <div class="flex-1 min-w-0 text-right"><p class="text-[9px] font-bold text-brand-500 uppercase mb-0.5">CF Novo</p><p class="font-mono text-xs font-bold text-brand-700 truncate" :title="sub.cfNovo">{{ sub.cfNovo || 'N/A' }}</p></div>
                </div>
-
                <!-- Rodapé do Card -->
                <div class="flex justify-between items-center pt-2 border-t border-slate-100 mt-2">
                   <div class="flex gap-2">
                      <a v-if="sub.cfAntigo" :href="kabumUrl(sub.cfAntigo)" target="_blank" class="text-[10px] font-bold text-slate-500 hover:text-brand-600 flex items-center gap-1 bg-white px-2 py-1.5 rounded border border-slate-200 hover:border-brand-300 transition-all" title="Ver produto antigo"><i class="fa-solid fa-arrow-up-right-from-square"></i> Antigo</a>
                      <a v-if="sub.cfNovo" :href="kabumUrl(sub.cfNovo)" target="_blank" class="text-[10px] font-bold text-brand-600 hover:text-brand-800 flex items-center gap-1 bg-white px-2 py-1.5 rounded border border-brand-200 hover:border-brand-400 shadow-sm transition-all" title="Ver produto novo"><i class="fa-solid fa-arrow-up-right-from-square"></i> Novo</a>
                   </div>
-                  
-                  <div class="text-right">
-                      <span class="text-[10px] text-slate-400 mr-1">Custo Novo:</span>
-                      <span class="text-sm font-bold text-slate-800">{{ formatMoney(sub.vlrNovo) }}</span>
-                  </div>
+                  <div class="text-right"><span class="text-[10px] text-slate-400 mr-1">Custo Novo:</span><span class="text-sm font-bold text-slate-800">{{ formatMoney(sub.vlrNovo) }}</span></div>
                </div>
             </div>
-
-            <div v-if="(!cfModal.item._subRecords || cfModal.item._subRecords.length === 0)" class="text-center text-slate-400 italic py-8">
-                Nenhum registro de troca encontrado.
-            </div>
+            <div v-if="(!cfModal.item._subRecords || cfModal.item._subRecords.length === 0)" class="text-center text-slate-400 italic py-8">Nenhum registro de troca encontrado.</div>
           </div>
-
           <!-- Totalizador Fixo -->
           <div class="p-6 border-t border-slate-100 bg-white flex justify-between items-center flex-shrink-0 z-10 shadow-[0_-5px_15px_rgba(0,0,0,0.02)]">
-             <div>
-               <span class="block text-xs font-bold text-slate-400 uppercase">Custo Total da OS</span>
-               <span class="text-[10px] text-slate-400">(Soma apenas dos produtos novos)</span>
-             </div>
+             <div><span class="block text-xs font-bold text-slate-400 uppercase">Custo Total da OS</span><span class="text-[10px] text-slate-400">(Soma apenas dos produtos novos)</span></div>
              <span class="text-3xl font-extrabold text-brand-600">{{ formatMoney(cfModal.item._custoTotal) }}</span>
           </div>
-
         </div>
       </div>
     </transition>
@@ -184,8 +200,8 @@
     <aside v-if="!focusMode" class="w-20 lg:w-64 bg-kabumblue-900 text-white flex flex-col justify-between transition-all duration-300 shadow-xl z-20 flex-shrink-0">
       <div>
         <div class="h-20 flex items-center justify-center lg:justify-start lg:px-6 border-b border-white/10 bg-kabumblue-900">
-          <div class="w-9 h-9 bg-brand-600 rounded-lg flex items-center justify-center text-white shadow-lg shadow-brand-600/30"><i class="fa-solid fa-bolt"></i></div>
-          <span class="ml-3 font-extrabold text-xl hidden lg:block tracking-tight text-white">Auditor<span class="text-brand-500">Pro</span></span>
+          <div class="w-9 h-9 bg-brand-600 rounded-lg flex items-center justify-center text-white shadow-lg shadow-brand-600/30"><i class="fa-solid fa-check-double"></i></div>
+          <span class="ml-3 font-extrabold text-xl hidden lg:block tracking-tight text-white">Validação<span class="text-brand-500">Pro</span></span>
         </div>
         <nav class="mt-8 px-3 space-y-2">
           <a href="#" @click.prevent="currentView = 'upload'" :class="navClass('upload')" class="group flex items-center px-3 py-3 rounded-xl transition-all duration-200">
@@ -206,7 +222,7 @@
             <span class="text-[10px] font-bold text-white/50 uppercase tracking-wider">Status</span>
           </div>
           <p class="text-xs text-white font-medium truncate pl-5">{{ statusMessage }}</p>
-          <p class="text-[9px] text-white/40 mt-1 pl-5">IA: {{ (knowledgeBase || []).length }} padrões</p>
+          <p class="text-[9px] text-white/40 mt-1 pl-5">IA: {{ aiKnowledgeCount }} exemplos</p>
         </div>
       </div>
     </aside>
@@ -231,8 +247,10 @@
           </button>
           <transition name="fade">
             <div v-if="(sessionData || []).length > 0 && !loading" class="flex gap-2 ml-2">
-              <button @click="exportarPDF" class="h-9 px-4 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-all text-xs font-bold flex items-center gap-2 group shadow-sm"><i class="fa-solid fa-file-pdf text-lg"></i></button>
-              <button @click="exportarCSV" class="h-9 px-4 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-emerald-50 hover:text-emerald-600 hover:border-emerald-200 transition-all text-xs font-bold flex items-center gap-2 group shadow-sm"><i class="fa-solid fa-file-csv text-lg"></i></button>
+              <button @click="applyAiSuggestions" class="h-9 px-4 rounded-xl border border-brand-200 bg-brand-50 text-brand-600 hover:bg-brand-100 transition-all text-xs font-bold flex items-center gap-2 group shadow-sm mr-2" title="Aplicar automaticamente onde a IA tem certeza"><i class="fa-solid fa-wand-magic-sparkles"></i> Aplicar Sugestões</button>
+
+              <button @click="openExportModal('pdf')" class="h-9 px-4 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-all text-xs font-bold flex items-center gap-2 group shadow-sm"><i class="fa-solid fa-file-pdf text-lg"></i> PDF</button>
+              <button @click="openExportModal('csv')" class="h-9 px-4 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-emerald-50 hover:text-emerald-600 hover:border-emerald-200 transition-all text-xs font-bold flex items-center gap-2 group shadow-sm"><i class="fa-solid fa-file-csv text-lg"></i> CSV</button>
               <button @click="iniciarSalvamento" :disabled="loading" class="h-9 px-6 rounded-xl bg-brand-600 hover:bg-brand-700 text-white shadow-lg shadow-brand-500/20 transition-all text-sm font-bold flex items-center gap-2 transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none ml-2">
                 <i v-if="loading" class="fa-solid fa-circle-notch fa-spin"></i><i v-else class="fa-solid fa-floppy-disk"></i><span>Salvar</span>
               </button>
@@ -247,8 +265,21 @@
           <div v-if="currentView === 'upload' && (sessionData || []).length === 0" key="upload" class="max-w-4xl mx-auto mt-12">
             <div class="bg-white p-12 rounded-3xl border border-slate-200 text-center shadow-xl shadow-slate-200/50">
                 <div class="w-20 h-20 bg-brand-50 text-brand-600 rounded-3xl flex items-center justify-center mx-auto mb-6 text-3xl shadow-sm ring-8 ring-brand-50/50"><i class="fa-solid fa-cloud-arrow-up"></i></div>
-                <h3 class="text-3xl font-bold text-slate-800 tracking-tight">Nova Análise</h3>
-                <p class="text-slate-500 mt-3 mb-10 max-w-lg mx-auto leading-relaxed text-sm">Arraste seu arquivo <b>.xlsx</b> ou <b>.csv</b>. <br>Filtro automático: <span class="bg-brand-50 px-2 py-0.5 rounded text-brand-700 font-mono text-xs font-bold border border-brand-100">Quarentena = Sim</span>.</p>
+                <h3 class="text-3xl font-bold text-slate-800 tracking-tight">Nova Validação</h3>
+                
+                <!-- Toggle de Filtro -->
+                <div class="flex items-center justify-center gap-3 mt-4 mb-8">
+                  <label class="relative inline-flex items-center cursor-pointer group">
+                    <input type="checkbox" v-model="useQuarantineFilter" class="sr-only peer">
+                    <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-brand-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-brand-600"></div>
+                    <span class="ml-3 text-sm font-medium text-slate-600 group-hover:text-brand-700 transition-colors">Filtrar por Quarentena?</span>
+                  </label>
+                  <div class="text-[10px] text-slate-400 bg-slate-100 px-2 py-1 rounded border border-slate-200" title="Ative se o arquivo conter mistura de máquinas. Desative se o arquivo já for só de quarentena.">
+                    <i class="fa-solid fa-circle-info"></i>
+                  </div>
+                </div>
+
+                <p class="text-slate-500 mt-3 mb-10 max-w-lg mx-auto leading-relaxed text-sm">Arraste seu arquivo <b>.xlsx</b> ou <b>.csv</b>.</p>
                 <div class="border-2 border-dashed border-slate-300 rounded-2xl p-12 transition-all duration-300 group cursor-pointer relative hover:border-brand-500 hover:bg-brand-50/30 bg-slate-50/30" :class="{ 'drag-active': isDragging }" @click="$refs.fileInput.click()" @dragover.prevent="isDragging = true" @dragleave.prevent="isDragging = false" @drop.prevent="handleDrop">
                     <input type="file" ref="fileInput" @change="handleFileUpload" accept=".csv, .xlsx, .xls" class="hidden">
                     <div class="flex flex-col items-center justify-center gap-4 pointer-events-none">
@@ -263,6 +294,7 @@
 
           <!-- DASHBOARD VIEW -->
           <div v-else-if="currentView === 'dashboard'" key="dashboard" class="space-y-8 max-w-6xl mx-auto">
+            <!-- (Mantido igual) -->
             <div class="bg-white p-8 rounded-3xl border border-slate-200 shadow-sm">
               <div class="flex items-center gap-4 mb-8">
                 <div class="w-12 h-12 bg-kabumblue-900 text-white rounded-2xl flex items-center justify-center text-xl shadow-md shadow-kabumblue-900/20"><i class="fa-regular fa-calendar-check"></i></div>
@@ -291,6 +323,7 @@
 
           <!-- HISTÓRICO VIEW -->
           <div v-else-if="currentView === 'historico'" key="historico" class="max-w-6xl mx-auto">
+            <!-- (Mantido igual) -->
             <div class="flex justify-between items-center mb-8">
               <h3 class="text-2xl font-bold text-slate-800">Sessões Anteriores</h3>
               <button @click="carregarHistorico" class="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 rounded-xl text-sm font-bold text-slate-600 transition-all shadow-sm flex items-center gap-2"><i class="fa-solid fa-rotate" :class="{'fa-spin': historyLoading}"></i> Atualizar</button>
