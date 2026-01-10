@@ -5,12 +5,11 @@
  */
 
 const CONFIG = {
-  ID_PLANILHA_DADOS: '10l1w3d3HYSKFgSsnjOZ545efR-bdIECEkOR82IjV3TE', // Planilha Divergência
+  ID_PLANILHA_DADOS: '10l1w3d3HYSKFgSsnjOZ545efR-bdIECEkOR82IjV3TE', 
   NOME_ABA_DADOS: 'Divergência',
-  ID_PLANILHA_CUSTOS: '1CEexqCPUyP5b4Qra1tt5qWyBIUW0lfIoYIEvYgBFhtA', // Base de CFs
+  ID_PLANILHA_CUSTOS: '1CEexqCPUyP5b4Qra1tt5qWyBIUW0lfIoYIEvYgBFhtA', 
   NOME_ABA_CUSTOS: 'Base de CFs',
   NOME_ABA_HISTORICO: 'Histórico de Auditorias',
-  // NOVA PLANILHA DE TREINAMENTO (Sua base histórica)
   ID_PLANILHA_TREINO: '1tUjt4G45BrRUxn-peLBVR7l6w7td6nDf8rD5hvoDGi8',
   NOME_ABA_TREINO: 'Trei_Hist'
 };
@@ -27,14 +26,13 @@ function include(filename) {
   return HtmlService.createHtmlOutputFromFile(filename).getContent();
 }
 
-// --- FUNÇÕES DE DADOS ---
-
 function buscarDadosPorListaOS(listaOS) {
   if (!listaOS || listaOS.length === 0) return [];
-  const dados = buscarDadosDivergencia();
+  const listaUnica = [...new Set(listaOS.map(os => String(os).trim().toUpperCase()))];
+  const setOS = new Set(listaUnica);
+  const dados = buscarDadosDivergencia(setOS);
   const dadosProdutos = carregarMapaPrecos();
-  const setOS = new Set(listaOS.map(os => String(os).trim().toUpperCase()));
-
+  
   const resultado = dados.filter(row => {
     let os = normalizarOS(row);
     return setOS.has(os);
@@ -44,9 +42,8 @@ function buscarDadosPorListaOS(listaOS) {
 }
 
 function buscarDadosPorPeriodo(ini, fim) {
-  const dados = buscarDadosDivergencia();
+  const dados = buscarDadosDivergencia(null); 
   const dadosProdutos = carregarMapaPrecos();
-  
   const dtIni = new Date(ini + 'T00:00:00');
   const dtFim = new Date(fim + 'T23:59:59');
 
@@ -59,54 +56,117 @@ function buscarDadosPorPeriodo(ini, fim) {
   return enriquecerComCustos(resultado, dadosProdutos);
 }
 
-// --- INTEGRAÇÃO COM IA E HISTÓRICO ---
-
 function carregarHistoricoTreinamento() {
   try {
     const ss = SpreadsheetApp.openById(CONFIG.ID_PLANILHA_TREINO);
     const aba = ss.getSheetByName(CONFIG.NOME_ABA_TREINO);
     if (!aba) return [];
-
     const dados = aba.getDataRange().getDisplayValues();
     if (dados.length < 2) return [];
-
-    // Mapeamento das colunas da sua planilha Trei_Hist
-    // A: OS, B: Data, C: Avaria Customiza, D: Processo, E: Motivos, F: Detalhe, G: Considerações (Decisão)
     const dataset = [];
-    
-    // Normalizador de labels (Humanos -> Código do Sistema)
     const mapLabel = (txt) => {
       const t = String(txt).toLowerCase().trim();
-      if (t.includes('reprovado') || t.includes('não pagar')) return 'nao_pagar';
+      if (t.includes('reprovado') || t.includes('não pagar') || t.includes('nao_pagar')) return 'nao_pagar';
       if (t.includes('aprovado') || t.includes('pagar') || t.includes('ok')) return 'ok_pagamento';
       if (t.includes('parceiro') || t.includes('avaria')) return 'avaria_parceiro';
       return null;
     };
-
     for (let i = 1; i < dados.length; i++) {
       const row = dados[i];
-      const motivo = row[4]; // Coluna E
-      const detalhe = row[5]; // Coluna F
-      const decisaoRaw = row[6]; // Coluna G (Considerações)
-      
+      const motivo = row[4]; const detalhe = row[5]; const decisaoRaw = row[6];
       const textoCompleto = `${motivo} ${detalhe}`.trim();
       const label = mapLabel(decisaoRaw);
-
       if (textoCompleto.length > 3 && label) {
-        dataset.push({
-          texto: textoCompleto,
-          categoria: label
-        });
+        dataset.push({ texto: textoCompleto, categoria: label });
       }
     }
     return dataset;
-  } catch (e) {
-    console.error("Erro ao carregar treino: " + e);
-    return [];
-  }
+  } catch (e) { return []; }
 }
 
-// --- PERSISTÊNCIA E HISTÓRICO ---
+function salvarAprendizado(dados) {
+  try {
+    const ss = SpreadsheetApp.openById(CONFIG.ID_PLANILHA_TREINO);
+    const aba = ss.getSheetByName(CONFIG.NOME_ABA_TREINO);
+    if(aba) {
+      let labelHumano = 'Em Análise';
+      if(dados.decisao === 'ok_pagamento') labelHumano = 'Aprovado Pagamento';
+      if(dados.decisao === 'nao_pagar') labelHumano = 'Reprovado Pagamento';
+      if(dados.decisao === 'avaria_parceiro') labelHumano = 'Avaria Parceiro';
+      const valorFormatado = dados.custoNovo ? parseFloat(dados.custoNovo) : 0;
+      const novaLinha = [
+        dados.os || '', dados.dataInicio || '', dados.avariaCust || '', dados.processo || '',
+        dados.motivo || '', dados.detalhe || '', labelHumano, valorFormatado,
+        dados.dataTreinamento || new Date()
+      ];
+      aba.appendRow(novaLinha);
+      const lastRow = aba.getLastRow();
+      if(lastRow > 0) aba.getRange(lastRow, 8).setNumberFormat("R$ #,##0.00");
+    }
+  } catch(e) {}
+}
+
+function obterResumoHistorico() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const aba = ss.getSheetByName(CONFIG.NOME_ABA_HISTORICO);
+  if (!aba) return { global: { acertos: 0, total: 0, percent: 0 }, sessoes: [] };
+
+  const dados = aba.getDataRange().getDisplayValues();
+  if (dados.length < 2) return { global: { acertos: 0, total: 0, percent: 0 }, sessoes: [] };
+
+  const mapaSessoes = {};
+  let globalTotal = 0;
+  let globalAcertos = 0;
+
+  const norm = (val) => {
+    if(!val) return '';
+    const v = String(val).toLowerCase().trim();
+    if(v === 'ok_pagamento' || v === 'pagar' || v === 'aprovado') return 'ok';
+    if(v === 'avaria_parceiro' || v === 'parceiro' || v === 'avaria') return 'avaria';
+    if(v === 'nao_pagar' || v === 'reprovado' || v === 'nao') return 'nao';
+    return v;
+  };
+
+  for (let i = 1; i < dados.length; i++) {
+    const row = dados[i];
+    const sugestao = norm(row[9]); 
+    const decisao = norm(row[10]); 
+    const idSessao = row[12];      
+    const dataAuditoria = row[11]; 
+
+    if (!idSessao) continue;
+
+    if (!mapaSessoes[idSessao]) {
+      mapaSessoes[idSessao] = { id: idSessao, data: dataAuditoria, total: 0, acertos: 0 };
+    }
+
+    if (sugestao && decisao && sugestao !== 'indefinido' && sugestao !== '-') {
+      mapaSessoes[idSessao].total++;
+      globalTotal++;
+      if (sugestao === decisao) {
+        mapaSessoes[idSessao].acertos++;
+        globalAcertos++;
+      }
+    }
+  }
+
+  const listaSessoes = Object.values(mapaSessoes).map(s => ({
+    id: s.id,
+    data: s.data,
+    total: s.total,
+    acertos: s.acertos,
+    percent: s.total > 0 ? (s.acertos / s.total) * 100 : 0
+  })).reverse();
+
+  return {
+    global: {
+      total: globalTotal,
+      acertos: globalAcertos,
+      percent: globalTotal > 0 ? (globalAcertos / globalTotal) * 100 : 0
+    },
+    sessoes: listaSessoes
+  };
+}
 
 function listarSessoesSalvas() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -114,10 +174,9 @@ function listarSessoesSalvas() {
   if (!aba) return [];
   const dados = aba.getDataRange().getValues();
   if (dados.length < 2) return [];
-  const idColIndex = 12; 
   const sessoes = new Set();
   for (let i = 1; i < dados.length; i++) {
-    if (dados[i][idColIndex]) sessoes.add(dados[i][idColIndex]);
+    if (dados[i][12]) sessoes.add(dados[i][12]);
   }
   return Array.from(sessoes).reverse();
 }
@@ -127,26 +186,18 @@ function carregarSessaoAntiga(idSessao) {
   const aba = ss.getSheetByName(CONFIG.NOME_ABA_HISTORICO);
   if (!aba) throw new Error("Histórico não encontrado.");
   const dados = aba.getDataRange().getDisplayValues();
-  if (dados.length < 2) return [];
-  const idColIndex = 12;
-  const resultado = [];
   
+  const resultado = [];
+  const targetId = String(idSessao).trim(); 
+
   for (let i = 1; i < dados.length; i++) {
-    if (dados[i][idColIndex] === idSessao) {
+    if (String(dados[i][12]).trim() === targetId) {
       const r = dados[i];
       resultado.push({
-        OS: r[0],
-        'NOME DO TÉCNICO': r[1],
-        'QUAL PROBLEMA?': r[2], 
-        'FOTO DA AVARIA!': r[3],
-        'CF PRODUTO ANTIGO': r[4],
-        _custoAntigo: parseMoney(r[5]),
-        'CF PRODUTO NOVO': r[6],
-        _custoNovo: parseMoney(r[7]),
-        _custoTotal: parseMoney(r[8]),
-        _sugestao: r[9] === '-' ? null : r[9],
-        _status: r[10],
-        _dataAuditoria: r[11]
+        OS: r[0], 'NOME DO TÉCNICO': r[1], 'QUAL PROBLEMA?': r[2], 
+        'FOTO DA AVARIA!': r[3], 'CF PRODUTO ANTIGO': r[4], _custoAntigo: parseMoney(r[5]),
+        'CF PRODUTO NOVO': r[6], _custoNovo: parseMoney(r[7]), _custoTotal: parseMoney(r[8]),
+        _sugestao: r[9], _status: r[10], _dataAuditoria: r[11]
       });
     }
   }
@@ -156,20 +207,12 @@ function carregarSessaoAntiga(idSessao) {
 function salvarSessaoNaPlanilha(nomeSessao, dados, isUpdate) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let aba = ss.getSheetByName(CONFIG.NOME_ABA_HISTORICO);
-  
-  const headers = [
-    "OS", "Técnico", "Problema/Detalhe", "Evidência", 
-    "CF Antigo", "Custo Antigo", "CF Novo", "Custo Novo", "Total Geral",
-    "Sugestão IA", "Decisão", "Data Auditoria", "ID Sessão"
-  ];
-
+  const headers = ["OS", "Técnico", "Problema/Detalhe", "Evidência", "CF Antigo", "Custo Antigo", "CF Novo", "Custo Novo", "Total Geral", "Sugestão IA", "Decisão", "Data Auditoria", "ID Sessão"];
   if (!aba) {
     aba = ss.insertSheet(CONFIG.NOME_ABA_HISTORICO);
-    aba.getRange(1, 1, 1, headers.length).setValues([headers])
-      .setFontWeight("bold").setBackground("#FF6500").setFontColor("#ffffff");
+    aba.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight("bold").setBackground("#FF6500").setFontColor("#ffffff");
     aba.setFrozenRows(1);
   }
-
   if (isUpdate) {
     const lastRow = aba.getLastRow();
     if (lastRow > 1) {
@@ -179,30 +222,15 @@ function salvarSessaoNaPlanilha(nomeSessao, dados, isUpdate) {
       }
     }
   }
-
   const linhas = dados.map(item => {
     const subs = Array.isArray(item._subRecords) ? item._subRecords : [];
-    const problemasStr = subs.length > 0
-      ? subs.map(s => `[${s.id}] ${s.problema}: ${s.detalhe}`).join(" | ")
-      : (item['QUAL PROBLEMA?'] || '');
-
+    const problemasStr = subs.length > 0 ? subs.map(s => `[${s.id}] ${s.problema}: ${s.detalhe}`).join(" | ") : (item['QUAL PROBLEMA?'] || '');
     return [
-      item.OS || item['NÚMERO OS'] || 'N/A',
-      item['NOME DO TÉCNICO'] || '',
-      problemasStr,
-      item['FOTO DA AVARIA!'] || '',
-      item['CF PRODUTO ANTIGO'] || '',
-      item._custoAntigo || 0,
-      item['CF PRODUTO NOVO'] || '',
-      item._custoNovo || 0,
-      item._custoTotal || 0,
-      item._sugestao || '-',
-      item._status, 
-      new Date(),
-      nomeSessao
+      item.OS || 'N/A', item['NOME DO TÉCNICO'] || '', problemasStr, item['FOTO DA AVARIA!'] || '',
+      item['CF PRODUTO ANTIGO'] || '', item._custoAntigo || 0, item['CF PRODUTO NOVO'] || '', item._custoNovo || 0, item._custoTotal || 0,
+      item._sugestao || '-', item._status, new Date(), nomeSessao
     ];
   });
-
   if (linhas.length > 0) {
     const lastRow = aba.getLastRow();
     const targetRow = Math.max(lastRow + 1, 2);
@@ -214,108 +242,40 @@ function salvarSessaoNaPlanilha(nomeSessao, dados, isUpdate) {
   return { success: true, nomeAba: nomeSessao };
 }
 
-// --- FUNÇÃO AJUSTADA PARA O NOVO FORMATO DE TREINAMENTO ---
-function salvarAprendizado(dados) {
-  // dados = { os, dataInicio, avariaCust, processo, motivo, detalhe, decisao, custoNovo }
-  try {
-    const ss = SpreadsheetApp.openById(CONFIG.ID_PLANILHA_TREINO);
-    const aba = ss.getSheetByName(CONFIG.NOME_ABA_TREINO);
-    
-    if(aba) {
-      // Mapeamento de decisão (Sistema -> Humano)
-      let labelHumano = 'Em Análise';
-      if(dados.decisao === 'ok_pagamento') labelHumano = 'Aprovado Pagamento';
-      if(dados.decisao === 'nao_pagar') labelHumano = 'Reprovado Pagamento';
-      if(dados.decisao === 'avaria_parceiro') labelHumano = 'Avaria Parceiro';
-      
-      // Formata custo para R$ se for numérico
-      // Se preferir salvar como número puro no Excel e formatar a coluna lá, apenas salve dados.custoNovo
-      const valorFormatado = dados.custoNovo 
-        ? parseFloat(dados.custoNovo) 
-        : 0;
-
-      // ESTRUTURA SOLICITADA:
-      // A: Número OS
-      // B: Data Início Montagem
-      // C: Avaria customiza?
-      // D: Processo?
-      // E: Motivos
-      // F: Detalhe o problema encontrado
-      // G: Considerações
-      // H: Custo CF Novo
-      
-      const novaLinha = [
-        dados.os || '',
-        dados.dataInicio || '', // Salva string como vem (DD/MM/YYYY) ou Date object
-        dados.avariaCust || '',
-        dados.processo || '',
-        dados.motivo || '',
-        dados.detalhe || '',
-        labelHumano,
-        valorFormatado
-      ];
-      
-      aba.appendRow(novaLinha);
-      
-      // Opcional: Formatar a última célula adicionada como Moeda
-      const lastRow = aba.getLastRow();
-      if(lastRow > 0) {
-         aba.getRange(lastRow, 8).setNumberFormat("R$ #,##0.00");
-      }
-    }
-  } catch(e) {
-    console.error("Erro ao salvar aprendizado: " + e);
-  }
-}
-
-// --- HELPERS (LEITURA CRÍTICA) ---
-
-function buscarDadosDivergencia() {
+function buscarDadosDivergencia(setFiltro = null) {
   try {
     const ss = SpreadsheetApp.openById(CONFIG.ID_PLANILHA_DADOS);
     const aba = ss.getSheetByName(CONFIG.NOME_ABA_DADOS);
     if (!aba) throw new Error("Aba Divergência não encontrada");
-    
     const lr = aba.getLastRow();
     const lc = aba.getLastColumn();
     if (lr < 2) return [];
-    
     const range = aba.getRange(2, 1, lr - 1, lc);
     const values = range.getDisplayValues();
-    
     const headers = values[0].map(h => String(h).trim().toUpperCase());
-    
-    return values.slice(1).map(r => {
+    const result = [];
+    for (let i = 1; i < values.length; i++) {
+      const r = values[i];
+      if (setFiltro) {
+         const osNaLinha = String(r[5] || '').trim().toUpperCase();
+         if (!setFiltro.has(osNaLinha)) continue; 
+      }
       let obj = {};
-      headers.forEach((h, i) => obj[h] = r[i]);
-
-      obj['_idx_data'] = r[0];         
-      obj['_idx_tecnico'] = r[1];      
-      obj['_idx_processo'] = r[2];     
-      obj['_idx_problema'] = r[3];     
-      obj['_idx_detalhe'] = r[4];      
-      obj['_idx_os'] = r[5];           
-      obj['_idx_inicio'] = r[6];       
-      obj['_idx_fim'] = r[7];          
-      obj['_idx_pedido'] = r[8];       
-      obj['_idx_prod_div'] = r[9];     
-      obj['_idx_tipo_troca'] = r[10];  
-      obj['_idx_avaria_cust'] = r[11]; 
-      
+      for (let j = 0; j < headers.length; j++) { obj[headers[j]] = r[j]; }
+      obj['_idx_data'] = r[0]; obj['_idx_tecnico'] = r[1]; obj['_idx_processo'] = r[2];     
+      obj['_idx_problema'] = r[3]; obj['_idx_detalhe'] = r[4]; obj['_idx_os'] = r[5];           
+      obj['_idx_inicio'] = r[6]; obj['_idx_fim'] = r[7]; obj['_idx_pedido'] = r[8];       
+      obj['_idx_prod_div'] = r[9]; obj['_idx_tipo_troca'] = r[10]; obj['_idx_avaria_cust'] = r[11]; 
       const idxFoto = headers.findIndex(h => h.includes('FOTO'));
       if(idxFoto > -1) obj['FOTO DA AVARIA!'] = r[idxFoto];
-
       const idxCFAnt = headers.findIndex(h => h.includes('CF PRODUTO ANTIGO'));
       const idxCFNov = headers.findIndex(h => h.includes('CF PRODUTO NOVO'));
       if(idxCFAnt > -1) obj['CF PRODUTO ANTIGO'] = r[idxCFAnt];
       if(idxCFNov > -1) obj['CF PRODUTO NOVO'] = r[idxCFNov];
-
-      return obj;
-    });
-  } catch (e) {
-    console.error(e);
-    throw e.message;
-  }
+      result.push(obj);
+    }
+    return result;
+  } catch (e) { throw e.message; }
 }
 
 function carregarMapaPrecos() {
@@ -325,17 +285,18 @@ function carregarMapaPrecos() {
     if (!aba) return {};
     const vals = aba.getDataRange().getDisplayValues();
     if (vals.length < 2) return {};
-    
     const headers = vals[0].map(h => String(h).trim().toUpperCase());
     const idxCodigo = headers.findIndex(h => h.includes('CÓDIGO') || h.includes('CODIGO'));
     const idxValor = headers.findIndex(h => h.includes('VALOR'));
-
+    const idxDesc = headers.findIndex(h => h.includes('DESCRIÇÃO') || h.includes('DESCRICAO'));
     const map = {};
     for (let i = 1; i < vals.length; i++) {
       const r = vals[i];
+      if (!r[idxCodigo]) continue;
       if (r[idxCodigo] && r[idxValor]) {
         map[String(r[idxCodigo]).trim().toUpperCase()] = {
-          preco: parseMoney(r[idxValor])
+          preco: parseMoney(r[idxValor]),
+          desc: idxDesc > -1 ? r[idxDesc] : 'Produto sem descrição' 
         };
       }
     }
@@ -347,14 +308,10 @@ function enriquecerComCustos(dados, dadosProdutos) {
   dados.forEach(row => {
     const cfAnt = String(row['CF PRODUTO ANTIGO']||'').trim().toUpperCase();
     const cfNov = String(row['CF PRODUTO NOVO']||'').trim().toUpperCase();
-    
-    const pAnt = dadosProdutos[cfAnt] || { preco: 0 };
-    const pNov = dadosProdutos[cfNov] || { preco: 0 };
-    
-    row._custoAntigo = pAnt.preco;
-    row._custoNovo = pNov.preco;
-    // ALTERAÇÃO: Soma apenas o valor do produto NOVO no custo total da troca
-    row._custoTotal = pNov.preco; 
+    const pAnt = dadosProdutos[cfAnt] || { preco: 0, desc: '' };
+    const pNov = dadosProdutos[cfNov] || { preco: 0, desc: '' };
+    row._custoAntigo = pAnt.preco; row._custoNovo = pNov.preco; row._custoTotal = pNov.preco; 
+    row._descAntigo = pAnt.desc; row._descNovo = pNov.desc;
   });
   return dados;
 }
