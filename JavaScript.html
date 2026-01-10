@@ -7,24 +7,23 @@
     KABUM_SEARCH_URL: 'https://www.kabum.com.br/busca/'
   };
 
-  // --- MOCK SERVICE (Fallback local) ---
+  // --- MOCK SERVICE ---
   const mockService = {
     buscarBaseConhecimento: () => Promise.resolve([]),
-    buscarHistoricoTreinamento: () => Promise.resolve([
-        { texto: 'Gabinete amassado na lateral', categoria: 'avaria_parceiro' },
-        { texto: 'Placa mãe não liga curto', categoria: 'ok_pagamento' }
+    buscarHistoricoTreinamento: () => Promise.resolve([]),
+    buscarDadosPorListaOS: (list) => Promise.resolve([]),
+    buscarDadosPorPeriodo: (i, f) => Promise.resolve([]),
+    obterResumoHistorico: () => Promise.resolve({
+        global: { acertos: 150, total: 200, percent: 75.0 },
+        sessoes: [
+            { id: 'Auditoria Mock 1', data: '01/01/2026', total: 50, acertos: 40, percent: 80.0 },
+            { id: 'Auditoria Mock 2', data: '02/01/2026', total: 10, acertos: 2, percent: 20.0 }
+        ]
+    }),
+    carregarSessaoAntiga: (n) => Promise.resolve([
+        { OS: 'MOCK1', 'NOME DO TÉCNICO': 'TESTE', 'QUAL PROBLEMA?': 'Prob', _status: 'ok_pagamento', _sugestao: 'ok_pagamento', _custoTotal: 100 }
     ]),
-    buscarDadosPorListaOS: (list) => new Promise(r => setTimeout(() => r(list.map(os => ({
-      OS: os, 'NOME DO TÉCNICO': 'Técnico Mock', 
-      'QUAL PROBLEMA?': 'Tela Defeito', 'DETALHE O PROBLEMA ENCONTRADO': 'Trincou',
-      '_idx_processo': 'Troca', 'FOTO DA AVARIA!': 'http://google.com',
-      'CF PRODUTO ANTIGO': '12345', 'CF PRODUTO NOVO': '67890',
-      _custoAntigo: 150.50, _custoNovo: 200.00, _custoTotal: 200.00
-    }))), 500)),
-    buscarDadosPorPeriodo: (i, f) => new Promise(r => setTimeout(() => r([]), 1000)),
-    listarSessoesSalvas: () => Promise.resolve(['Auditoria 01/05']),
-    carregarSessaoAntiga: (n) => Promise.resolve([]),
-    salvarSessaoNaPlanilha: (n) => new Promise(r => setTimeout(() => r({nomeAba: n}), 1000)),
+    salvarSessaoNaPlanilha: (n) => Promise.resolve({nomeAba: n}),
     salvarAprendizado: () => {}
   };
 
@@ -42,73 +41,99 @@
       const viewTitle = computed(() => {
         if (currentView.value === 'upload') return 'Nova Auditoria';
         if (currentView.value === 'dashboard') return 'Dashboard';
+        if (currentView.value === 'compare') return 'Auditoria Cruzada (Juiz)';
         return 'Histórico';
       });
 
-      // State
+      // State Principal
       const loading = ref(false);
       const statusMessage = ref('Iniciando...');
       const sessionData = shallowRef([]); 
+      
+      // HISTORY STATE
       const historyList = ref([]);
+      const historyGlobalStats = reactive({ acertos: 0, total: 0, percent: 0 });
+      const historyViewMode = ref('list');
+      const historyDetailData = shallowRef([]);
+      const historySelectedSession = ref(null);
       const historyLoading = ref(false);
+      const accuracyStats = reactive({ session: { percent: 0, total: 0 } });
+
+      // Session & Filter State
       const editingSessionName = ref(null);
       const searchQuery = ref('');
-      
       const activeFilter = ref('pendente');
-      const useQuarantineFilter = ref(true); // Toggle para o filtro de Quarentena
-
+      const useQuarantineFilter = ref(true);
       const availableFilters = [
-          { key: 'todos', label: 'Todos' },
-          { key: 'pendente', label: 'Pendentes' },
-          { key: 'indefinido', label: 'Indefinidos (IA)' },
-          { key: 'ok_pagamento', label: 'Aprovados' },
-          { key: 'avaria_parceiro', label: 'Avariados' },
-          { key: 'nao_pagar', label: 'Reprovados' }
+          {key:'todos',label:'Todos'},
+          {key:'pendente',label:'Pendentes'},
+          {key:'indefinido',label:'Indefinidos'},
+          {key:'ok_pagamento',label:'Aprovados'},
+          {key:'avaria_parceiro',label:'Avariados'},
+          {key:'nao_pagar',label:'Reprovados'}
       ];
       const filters = reactive({ start: '', end: '' });
       const fileInput = ref(null);
       const isDragging = ref(false);
       const toasts = ref([]);
       
+      // Modals
       const modal = reactive({ show: false, title: '', message: '', onConfirm: null });
       const cfModal = reactive({ show: false, item: null });
       const occurrenceModal = reactive({ show: false, item: null });
+      const exportModal = reactive({ show: false, type: 'pdf' });
+      
+      // AI & Judge
+      const aiModal = reactive({ show: false });
+      const aiSuggestionsList = ref([]);
+      const judgeState = reactive({ 
+          internalFile: null, partnerFile: null, 
+          internalDataRaw: [], partnerDataRaw: [], 
+          internalHeaders: [], partnerHeaders: [], 
+          colOsInt: '', colStatusInt: '', 
+          colOsParceiro: '', colStatusParceiro: '', 
+          results: [] 
+      });
 
+      // UI Helpers
       const selectedRows = ref([]);
       const focusMode = ref(false);
       const hoveredItem = ref(null);
-
-      // Dataset local para treino em tempo real
+      const csvColumns = ref(['OS', 'Técnico', 'Problema', 'Status', 'Custo Total']);
+      const selectedCsvColumns = ref(['OS', 'Técnico', 'Problema', 'Status']);
       const localTrainingData = ref([]);
-
       let costChartInstance = null;
       let statusChartInstance = null;
 
-      // --- HELPERS E FORMATTERS ---
+      // --- HELPERS ---
       const formatMoney = (v) => (v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
       
       const normalizeKey = (k) => {
           if (!k) return null;
-          const lower = k.toLowerCase().trim();
-          if (lower === 'pagar' || lower === 'ok_pagamento') return 'ok_pagamento';
-          if (lower === 'parceiro' || lower === 'avaria_parceiro') return 'avaria_parceiro';
-          if (lower === 'reprovado' || lower === 'nao_pagar') return 'nao_pagar';
+          const lower = String(k).toLowerCase().trim();
+          
+          if (lower === 'pendente') return 'pendente';
           if (lower === 'indefinido') return 'indefinido';
-          return k;
+          
+          // Match Exato
+          if (['ok', 'sim', 'pagar', 'apto', 's', 'aprovado'].includes(lower)) return 'ok_pagamento';
+          if (['nao', 'não', 'n', 'reprovado', 'inapto'].includes(lower)) return 'nao_pagar';
+          if (['parceiro', 'avaria', 'cliente'].includes(lower)) return 'avaria_parceiro';
+          
+          // Match Parcial Seguro
+          if (lower.includes('ok_pagamento') || lower.includes('aprovado') || lower.includes('procedente')) return 'ok_pagamento';
+          if (lower.includes('avaria_parceiro') || lower.includes('dano fisico')) return 'avaria_parceiro';
+          if (lower.includes('nao_pagar') || lower.includes('reprovado') || lower.includes('improcedente')) return 'nao_pagar';
+          
+          return 'indefinido';
       };
 
       const formatStatus = (s) => ({ 
         'ok_pagamento': 'Pagar', 
         'avaria_parceiro': 'Parceiro', 
-        'nao_pagar': 'Reprovado',
-        'indefinido': 'Indefinido'
+        'nao_pagar': 'Reprovado', 
+        'indefinido': 'Indefinido' 
       }[normalizeKey(s)] || s);
-
-      const setMonth = () => {
-          const d = new Date();
-          filters.start = new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0];
-          filters.end = new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().split('T')[0];
-      };
 
       const getRowClass = (item) => {
           const s = normalizeKey(item._status);
@@ -138,68 +163,21 @@
       };
 
       const navClass = (view) => currentView.value === view ? 'bg-brand-600 text-white shadow-lg shadow-brand-900/30 ring-1 ring-white/10' : 'text-slate-400 hover:bg-slate-50 hover:text-brand-600';
+      
       const getToastClass = (type) => type === 'error' ? 'bg-rose-600 border-rose-500' : 'bg-kabumblue-900 border-brand-500';
       const getToastIcon = (type) => type === 'error' ? 'fa-solid fa-circle-exclamation' : 'fa-solid fa-circle-check';
-      const isSelected = (item) => selectedRows.value.includes(item.OS);
 
-      // --- FLEXIBLE EXCEL LOGIC ---
-      
-      const normalizeHeader = (str) => {
-          if (!str) return '';
-          return String(str)
-              .toUpperCase()
-              .normalize("NFD").replace(/[\u0300-\u036f]/g, "") 
-              .replace(/[^A-Z0-9]/g, ""); 
+      const setMonth = () => {
+          const d = new Date();
+          filters.start = new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0];
+          filters.end = new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().split('T')[0];
       };
 
-      const findHeaderRow = (matrix) => {
-          const candidates = ['NOS', 'NROS', 'NUMEROOS', 'OS', 'ORDEM', 'ORDEMDESERVICO', 'SERVICE', 'TICKET', 'ID', 'CODIGO'];
-          
-          for(let i=0; i < Math.min(20, matrix.length); i++) {
-              if(!matrix[i]) continue;
-              const found = matrix[i].some(cell => {
-                  const val = normalizeHeader(cell);
-                  return candidates.includes(val);
-              });
-
-              if (found) return i;
-          }
-          return 0; 
-      };
-
-      const processarHeader = (matrix) => {
-           if (!matrix.length) return { dadosFormatados: [] };
-           const headerIdx = findHeaderRow(matrix);
-           const headers = matrix[headerIdx].map(h => h ? String(h).trim() : `UNK_${Math.random()}`);
-           const rows = matrix.slice(headerIdx + 1).map(r => { 
-               let obj = {}; 
-               r.forEach((c, i) => { 
-                   if(headers[i]) obj[headers[i]] = c; 
-               }); 
-               return obj; 
-           });
-           
-           return { dadosFormatados: rows };
-      };
-
-      const extractOS = (data) => {
-           if(!data.length) return [];
-           const keys = Object.keys(data[0]);
-           
-           const targets = ['NOS', 'NROS', 'NUMEROOS', 'OS', 'ORDEMDESERVICO', 'ORDEMSERVICO', 'ID', 'TICKET', 'CODIGO', 'CHAMADO'];
-           
-           let key = keys.find(k => targets.includes(normalizeHeader(k)));
-           
-           if (!key) {
-               key = keys.find(k => {
-                   const norm = normalizeHeader(k);
-                   return norm.includes('OS') || norm === 'ID';
-               });
-           }
-
-           console.log("Coluna de OS detectada:", key);
-           return key ? data.map(r => r[key]).filter(Boolean) : [];
-      };
+      // --- EXCEL HELPERS ---
+      const normalizeHeader = (str) => { if (!str) return ''; return String(str).toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Z0-9]/g, ""); };
+      const findHeaderRow = (matrix) => { const c = ['NOS','NROS','NUMEROOS','OS','ORDEM','ORDEMDESERVICO','SERVICE','TICKET','ID','CODIGO']; for(let i=0; i < Math.min(20, matrix.length); i++) { if(!matrix[i]) continue; if(matrix[i].some(cell => c.includes(normalizeHeader(cell)))) return i; } return 0; };
+      const processarHeader = (matrix) => { if (!matrix.length) return { dadosFormatados: [] }; const hIdx = findHeaderRow(matrix); const headers = matrix[hIdx].map(h => h ? String(h).trim() : `UNK_${Math.random()}`); const rows = matrix.slice(hIdx + 1).map(r => { let obj = {}; r.forEach((c, i) => { if(headers[i]) obj[headers[i]] = c; }); return obj; }); return { dadosFormatados: rows, headers: headers }; };
+      const extractOS = (data) => { if(!data.length) return []; const keys = Object.keys(data[0]); let key = keys.find(k => normalizeHeader(k).includes('OS')); if (!key) key = keys.find(k => normalizeHeader(k).includes('ID')); return key ? data.map(r => r[key]).filter(Boolean) : []; };
 
       // --- LIFECYCLE ---
       onMounted(async () => {
@@ -207,127 +185,400 @@
         const savedView = localStorage.getItem('auditor_view');
         if(savedView) currentView.value = savedView;
         try {
-          statusMessage.value = 'Treinando IA...';
           const serverData = await runGoogle('carregarHistoricoTreinamento');
-          localTrainingData.value = serverData;
-          
-          if(window.MLService && localTrainingData.value.length > 0) {
-            window.MLService.train(localTrainingData.value);
-            statusMessage.value = 'IA Pronta (' + localTrainingData.value.length + ' padrões)';
+          if (Array.isArray(serverData) && serverData.length > 0) {
+             localTrainingData.value = serverData;
+             if(typeof window.MLService !== 'undefined') {
+                window.MLService.train(localTrainingData.value);
+                statusMessage.value = `IA: ${serverData.length} ex.`;
+             }
           } else {
-            statusMessage.value = 'IA Sem Dados';
+             localTrainingData.value = [];
+             statusMessage.value = 'IA: Sem dados';
           }
           setMonth();
-        } catch (e) {
-          statusMessage.value = 'Erro Conexão';
-          showToast('Erro ao carregar IA: ' + e, 'error');
-        }
+        } catch (e) { statusMessage.value = 'IA Off'; }
       });
-      onUnmounted(() => { window.removeEventListener('keydown', handleKeyboard); });
-      watch(currentView, (newVal) => {
-          localStorage.setItem('auditor_view', newVal);
-          if(newVal === 'dashboard' && (sessionData.value || []).length > 0) setTimeout(updateCharts, 100);
+      onUnmounted(() => window.removeEventListener('keydown', handleKeyboard));
+      watch(currentView, (v) => {
+          localStorage.setItem('auditor_view', v);
+          if(v === 'dashboard' && sessionData.value.length > 0) setTimeout(updateCharts, 100);
       });
 
-      // --- COMPUTED ---
-      const filteredData = computed(() => {
-        let data = sessionData.value || [];
-        if (activeFilter.value === 'indefinido') {
-            data = data.filter(item => 
-              normalizeKey(item._status) === 'pendente' && 
-              (normalizeKey(item._sugestao) === 'indefinido' || !item._sugestao)
-            );
-        } else if (activeFilter.value !== 'todos') {
-            data = data.filter(item => normalizeKey(item._status) === activeFilter.value);
-        }
+      // --- HISTORY LOGIC ---
+      const carregarHistorico = () => {
+          historyLoading.value = true;
+          historyViewMode.value = 'list';
+          runGoogle('obterResumoHistorico')
+            .then(res => {
+                historyGlobalStats.acertos = res.global.acertos;
+                historyGlobalStats.total = res.global.total;
+                historyGlobalStats.percent = res.global.percent;
+                historyList.value = res.sessoes;
+            })
+            .catch(err => showToast("Erro histórico: " + err, 'error'))
+            .finally(() => historyLoading.value = false);
+      };
 
-        if (searchQuery.value) {
-          const q = searchQuery.value.toLowerCase();
-          data = data.filter(item => 
-            (item.OS || '').toLowerCase().includes(q) || 
-            (item['NOME DO TÉCNICO'] || '').toLowerCase().includes(q)
-          );
-        }
-        
-        if (activeFilter.value === 'todos') {
-             return [...data].sort((a, b) => (normalizeKey(a._status) === 'pendente' ? -1 : 1));
-        }
-        return data;
-      });
-
-      const isAllSelected = computed(() => {
-          if ((filteredData.value || []).length === 0) return false;
-          return filteredData.value.every(item => selectedRows.value.includes(item.OS));
-      });
-      
-      const aiKnowledgeCount = computed(() => localTrainingData.value.length);
-
-      const completedCount = computed(() => (sessionData.value || []).filter(i => normalizeKey(i._status) !== 'pendente').length);
-      const progressPercent = computed(() => {
-          const total = (sessionData.value || []).length;
-          if (total === 0) return 0;
-          return (completedCount.value / total) * 100;
-      });
-      
-      const stats = computed(() => {
-        let approvedCount = 0, approvedPartsCost = 0, partnerCount = 0, partnerCost = 0, rejectedCount = 0, rejectedCost = 0;
-        let assemblyCost = 0;
-
-        (sessionData.value || []).forEach(item => {
-          const cost = item._custoTotal || 0;
-          const s = normalizeKey(item._status);
+      const loadSession = (session) => {
+          loading.value = true;
+          historySelectedSession.value = session;
           
-          if (s === 'ok_pagamento') { 
-              approvedCount++; 
-              approvedPartsCost += cost; 
-              // REGRA ATUALIZADA: Taxa aplicada a TODOS os aprovados, sem exceção
-              assemblyCost += AppConfig.TAXA_MONTAGEM;
+          runGoogle('carregarSessaoAntiga', session.id)
+            .then(data => {
+                historyViewMode.value = 'detail';
+                processServerData(data, null, true); 
+                
+                let acertos = 0;
+                let total = 0;
+                (historyDetailData.value || []).forEach(item => {
+                    const sug = normalizeKey(item._sugestao);
+                    const dec = normalizeKey(item._status);
+                    if (sug && dec && sug !== 'indefinido' && sug !== '-' && dec !== 'pendente') {
+                        total++;
+                        if (sug === dec) acertos++;
+                    }
+                });
+                accuracyStats.session = { total, percent: total > 0 ? (acertos / total) * 100 : 0 };
+            })
+            .catch(err => showToast("Erro ao abrir sessão: " + err, 'error'))
+            .finally(() => loading.value = false);
+      };
+
+      const backToHistoryList = () => {
+          historyViewMode.value = 'list';
+          historyDetailData.value = [];
+          historySelectedSession.value = null;
+      };
+
+      // --- JUDGE / COMPARISON LOGIC ---
+      const loadFileForJudge = (e, target) => {
+          const file = e.target.files[0]; if (!file) return;
+          const reader = new FileReader();
+          reader.onload = (evt) => {
+              try {
+                  const wb = XLSX.read(evt.target.result, { type: 'array' });
+                  const raw = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+                  const { dadosFormatados, headers } = processarHeader(raw);
+                  
+                  if (target === 'internal') {
+                      judgeState.internalDataRaw = dadosFormatados;
+                      judgeState.internalHeaders = headers;
+                      judgeState.colOsInt = headers.find(h => normalizeHeader(h).includes('OS')) || '';
+                      judgeState.colStatusInt = headers.find(h => ['STATUS','DECISAO','CLASSIFICACAO'].includes(normalizeHeader(h))) || '';
+                  } else {
+                      judgeState.partnerDataRaw = dadosFormatados;
+                      judgeState.partnerHeaders = headers;
+                      judgeState.colOsParceiro = headers.find(h => normalizeHeader(h).includes('OS')) || '';
+                      judgeState.colStatusParceiro = headers.find(h => normalizeHeader(h).includes('APTO') || normalizeHeader(h).includes('STATUS')) || '';
+                  }
+              } catch(err) { showToast("Erro ao ler arquivo: " + err, "error"); }
+          };
+          reader.readAsArrayBuffer(file);
+      };
+
+      const runJudge = () => {
+          if (!judgeState.internalDataRaw.length || !judgeState.partnerDataRaw.length) return showToast("Carregue ambos os arquivos.", "error");
+          if (!judgeState.colOsInt || !judgeState.colStatusInt || !judgeState.colOsParceiro || !judgeState.colStatusParceiro) return showToast("Selecione as colunas de OS e Status/Apto para ambos.", "error");
+
+          if (window.JudgeService) {
+              const results = window.JudgeService.julgar(
+                  judgeState.internalDataRaw, 
+                  judgeState.partnerDataRaw, 
+                  {
+                      colOsInt: judgeState.colOsInt,
+                      colStatusInt: judgeState.colStatusInt,
+                      colOsParceiro: judgeState.colOsParceiro,
+                      colStatusParceiro: judgeState.colStatusParceiro
+                  }
+              );
+              judgeState.results = results;
+              showToast("Auditoria Cruzada concluída!", "success");
+          } else {
+              showToast("Serviço de Julgamento não carregado.", "error");
           }
-          else if (s === 'avaria_parceiro') { partnerCount++; partnerCost += cost; }
-          else if (s === 'nao_pagar') { rejectedCount++; rejectedCost += cost; }
-        });
-        
-        const totalCost = approvedPartsCost + assemblyCost;
-        return { approvedCount, approvedPartsCost, assemblyCost, totalCost, partnerCount, partnerCost, rejectedCount, rejectedCost };
-      });
-
-      // --- ACTIONS & HANDLERS ---
+      };
       
+      const downloadJudgeReport = () => {
+          if (window.JudgeService && judgeState.results.length > 0) {
+              window.JudgeService.exportarRelatorioJuiz(judgeState.results);
+          }
+      };
+
+      // --- DATA LOGIC ---
+      const handleFileUpload = (e) => {
+        const file = e.target.files[0]; if (!file) return;
+        loading.value = true; statusMessage.value = 'Lendo...';
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          try {
+            const workbook = XLSX.read(evt.target.result, { type: 'array' });
+            const raw = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { header: 1 });
+            const { dadosFormatados } = processarHeader(raw);
+            
+            const filtered = dadosFormatados.filter(row => {
+               if (!useQuarantineFilter.value) return true;
+               const k = Object.keys(row).find(k => normalizeHeader(k).includes('QUARENTENA'));
+               return k ? String(row[k]).toUpperCase().trim() === 'SIM' : true;
+            });
+
+            const osList = extractOS(filtered);
+            if (osList.length === 0) {
+              loading.value = false;
+              return showToast("Nenhuma coluna de OS encontrada no arquivo.", "error");
+            }
+            statusMessage.value = `Buscando ${osList.length} itens...`;
+            runGoogle('buscarDadosPorListaOS', osList)
+              .then(data => processServerData(data, osList, false))
+              .catch(err => showToast("Erro: " + err, "error"))
+              .finally(() => { loading.value = false; statusMessage.value = 'Pronto'; });
+          } catch (e) {
+            console.error(e); showToast("Erro ao ler arquivo", "error"); loading.value = false;
+          }
+        };
+        reader.readAsArrayBuffer(file);
+        e.target.value = '';
+      };
+
+      const fetchByPeriod = () => {
+        if (!filters.start || !filters.end) return showToast("Defina as datas.", "error");
+        loading.value = true; statusMessage.value = 'Buscando...';
+        runGoogle('buscarDadosPorPeriodo', filters.start, filters.end)
+          .then(data => { processServerData(data); updateCharts(); })
+          .catch(err => showToast("Erro: " + err, "error"))
+          .finally(() => { loading.value = false; statusMessage.value = 'Pronto'; });
+      };
+
+      const processServerData = (data, reqList, isHistory = false) => {
+          const safeData = data || [];
+          
+          if (reqList && reqList.length > 0) {
+             const foundSet = new Set(safeData.map(d => {
+                const val = d.OS || d['NÚMERO OS'] || d.ID || d['_idx_os'];
+                return val ? String(val).trim().toUpperCase() : '';
+             }));
+             const missing = reqList.filter(os => !foundSet.has(String(os).trim().toUpperCase()));
+             
+             missing.forEach(os => {
+                 safeData.push({
+                    OS: os, 'NOME DO TÉCNICO': 'NÃO LOCALIZADO', 'QUAL PROBLEMA?': 'DADOS NÃO LOCALIZADOS',
+                    'DETALHE O PROBLEMA ENCONTRADO': 'OS não encontrada na base de divergência (Erro de Processo - Parceiro não preencheu).',
+                    'FOTO DA AVARIA!': null, 'CF PRODUTO ANTIGO': '', 'CF PRODUTO NOVO': '',
+                    _custoAntigo: 0, _custoNovo: 0, _custoTotal: 0, 
+                    _status: 'nao_pagar', // REPROVADO AUTOMATICO
+                    _sugestao: 'nao_pagar', 
+                    _sugestaoReason: 'Regra: OS não localizada na base (Erro de Processo)',
+                    _subRecords: []
+                 });
+             });
+          }
+
+          if (safeData.length === 0) return showToast("Nenhum dado encontrado.", "error");
+          
+          const grouped = {};
+          safeData.forEach(d => {
+              const rawOS = d.OS || d['NÚMERO OS'] || d.ID || d['_idx_os'] || 'N/A';
+              const osKey = String(rawOS).trim().toUpperCase();
+              if (!grouped[osKey]) grouped[osKey] = [];
+              grouped[osKey].push(d);
+          });
+
+          const newData = Object.keys(grouped).map(osKey => {
+            const records = grouped[osKey];
+            let totalCustoAntigo = 0, totalCustoNovo = 0, totalCustoTotal = 0;
+            let fullText = "";
+            let techs = new Set(), photos = [];
+            
+            const subRecords = records.map((r, i) => {
+                const cTotal = parseFloat(r._custoTotal) || 0;
+                totalCustoTotal += cTotal;
+                totalCustoAntigo += (parseFloat(r._custoAntigo)||0);
+                totalCustoNovo += (parseFloat(r._custoNovo)||0);
+                
+                const prob = r['_idx_problema'] || r['QUAL PROBLEMA?'] || '';
+                const det = r['_idx_detalhe'] || r['DETALHE O PROBLEMA ENCONTRADO'] || '';
+                const tec = r['_idx_tecnico'] || r['NOME DO TÉCNICO'] || 'N/A';
+                
+                fullText += ` ${prob} ${det}`;
+                if (tec !== 'N/A') techs.add(tec);
+                
+                const photo = r['FOTO DA AVARIA!'];
+                if (photo && photo.startsWith('http')) photos.push(photo);
+
+                return { 
+                  id: i + 1, problema: prob, detalhe: det, custo: cTotal,
+                  processo: r['_idx_processo'], os: osKey,
+                  cfAntigo: r['CF PRODUTO ANTIGO'], cfNovo: r['CF PRODUTO NOVO'],
+                  vlrAntigo: parseFloat(r._custoAntigo)||0, vlrNovo: parseFloat(r._custoNovo)||0,
+                  descAntigo: r['_descAntigo'] || r['descAntigo'] || '', 
+                  descNovo: r['_descNovo'] || r['descNovo'] || '',
+                  inicio: r['_idx_inicio'], fim: r['_idx_fim'],
+                  pedido: r['_idx_pedido'], produtoDiv: r['_idx_prod_div'],
+                  tipoProb: r['_idx_tipo_problema'] || r['_idx_tipo_troca'], 
+                  tipoTroca: r['_idx_tipo_troca'], avariaCust: r['_idx_avaria_cust']
+                };
+            });
+            
+            const r0 = records[0];
+            const context = { 
+                avariaCust: records.map(r => r['_idx_avaria_cust'] || '').join(' '), 
+                processo: records.map(r => r['_idx_processo'] || '').join(' ') 
+            };
+
+            let sugestaoObj = { category: 'indefinido', reason: '' };
+            
+            if (r0._sugestao && (r0._sugestaoReason || isHistory || (r0._sugestao !== '-' && r0._sugestao !== 'indefinido'))) {
+               sugestaoObj = { category: r0._sugestao, reason: r0._sugestaoReason || 'Registrado no Histórico' };
+            } 
+            else if (window.MLService && fullText.length > 5) {
+               if (localTrainingData.value.length > 0) {
+                   sugestaoObj = window.MLService.predict(fullText.trim(), context);
+               }
+            }
+            
+            let finalStatus = 'pendente';
+            if (isHistory) finalStatus = normalizeKey(r0._status);
+            else if (r0._status === 'nao_pagar' && r0._sugestaoReason && r0._sugestaoReason.includes('Regra')) finalStatus = 'nao_pagar';
+
+            return {
+              OS: osKey, 'NOME DO TÉCNICO': Array.from(techs).join(', '),
+              _subRecords: subRecords, _photos: photos,
+              _custoAntigo: totalCustoAntigo, _custoNovo: totalCustoNovo, _custoTotal: totalCustoTotal,
+              _textoAnalise: fullText.trim(),
+              _sugestao: normalizeKey(sugestaoObj.category), 
+              _sugestaoReason: sugestaoObj.reason,
+              _status: finalStatus,
+              _isDup: records.length > 1, _dupCount: records.length,
+              _context: context
+            };
+          });
+
+          if (historyViewMode.value === 'detail') {
+              historyDetailData.value = newData;
+          } else {
+              sessionData.value = newData;
+              triggerRef(sessionData);
+              runBackgroundML(); 
+          }
+      };
+
+      const runBackgroundML = async () => {
+          if (!window.MLService || localTrainingData.value.length === 0) return;
+          const data = sessionData.value;
+          const chunkSize = 20; 
+          
+          const processChunk = (startIndex) => {
+              if (startIndex >= data.length) return;
+              let madeChanges = false;
+              const end = Math.min(startIndex + chunkSize, data.length);
+              
+              for (let i = startIndex; i < end; i++) {
+                  const item = data[i];
+                  if(item._status === 'nao_pagar' && item._sugestaoReason && item._sugestaoReason.includes('Erro de Processo')) continue;
+
+                  if ((!item._sugestao || normalizeKey(item._sugestao) === 'indefinido') && item._textoAnalise && item._textoAnalise.length > 5) {
+                      const res = window.MLService.predict(item._textoAnalise, item._context);
+                      const normPrediction = normalizeKey(res.category);
+                      if (normPrediction && normPrediction !== normalizeKey(item._sugestao)) {
+                          item._sugestao = normPrediction;
+                          item._sugestaoReason = res.reason;
+                          madeChanges = true;
+                      }
+                  }
+              }
+              if (madeChanges) triggerRef(sessionData);
+              requestAnimationFrame(() => processChunk(end));
+          };
+          processChunk(0);
+      };
+
+      // --- ACTIONS (UI) ---
+      
+      const iniciarSalvamento = () => {
+          if (completedCount.value === 0) {
+              openModal("Salvar Sessão Vazia?", "Nenhum item foi classificado. Deseja salvar mesmo assim?", salvarSessao);
+          } else { salvarSessao(); }
+      };
+
+      const salvarSessao = () => {
+        loading.value = true;
+        const name = editingSessionName.value || `Auditoria ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
+        runGoogle('salvarSessaoNaPlanilha', name, JSON.parse(JSON.stringify(sessionData.value)), !!editingSessionName.value)
+          .then(res => {
+            showToast("Sessão salva com sucesso!", "success");
+            if (!editingSessionName.value) editingSessionName.value = res.nomeAba;
+          })
+          .catch(err => showToast("Erro ao salvar: " + err, "error"))
+          .finally(() => loading.value = false);
+      };
+
       const registrarAprendizado = (item, decision) => {
-           if (!item._subRecords || item._subRecords.length === 0) return;
+           if (!item._subRecords.length) return;
+           const last = item._subRecords[item._subRecords.length - 1];
+           
+           let textoLimpo = (last.detalhe || '').trim();
+           if (textoLimpo.length < 4) textoLimpo = (last.problema || '').trim();
 
-            const lastSub = item._subRecords[item._subRecords.length - 1];
-            let textoLimpo = (lastSub.detalhe || '').trim();
-            if (textoLimpo.length < 4) textoLimpo = (lastSub.problema || '').trim();
-
-            if (textoLimpo.length > 4 && !textoLimpo.includes('DADOS NÃO LOCALIZADOS')) {
+           if (textoLimpo.length > 4 && !textoLimpo.includes('DADOS NÃO LOCALIZADOS')) {
                 const now = new Date();
                 const dateString = now.toLocaleDateString('pt-BR') + ' ' + now.toLocaleTimeString('pt-BR');
+                
+                const tipoProblema = item.tipoProb || item._subRecords.map(s => s.tipoProb).join(' | ') || '';
+                const motivoComposto = tipoProblema ? `${last.problema} [${tipoProblema}]` : last.problema;
 
                 const payload = {
-                    os: item.OS,
-                    dataInicio: lastSub.inicio, 
-                    avariaCust: lastSub.avariaCust,
-                    processo: lastSub.processo,
-                    motivo: lastSub.problema,
-                    detalhe: lastSub.detalhe,
-                    decisao: decision,
-                    custoNovo: lastSub.vlrNovo,
-                    texto: `${lastSub.problema} ${lastSub.detalhe}`.trim(),
-                    categoria: decision,
-                    // CAMPO: Data do Treinamento
+                    os: item.OS, dataInicio: last.inicio, avariaCust: last.avariaCust,
+                    processo: last.processo, 
+                    motivo: motivoComposto, 
+                    detalhe: last.detalhe,
+                    decisao: decision, custoNovo: last.vlrNovo,
+                    texto: `${motivoComposto} ${last.detalhe}`.trim(), categoria: decision,
                     dataTreinamento: dateString
                 };
                 
                 runGoogle('salvarAprendizado', payload);
-                
                 localTrainingData.value.push(payload);
-                if (window.MLService) {
-                    window.MLService.train(localTrainingData.value);
-                }
+                if (window.MLService) { window.MLService.train(localTrainingData.value); }
             }
       };
 
+      // --- AI MODAL LOGIC ---
+      const openAiModal = () => {
+        const list = [];
+        (sessionData.value || []).forEach(item => {
+            if (normalizeKey(item._status) !== 'pendente') return;
+            const result = window.MLService.predict(item._textoAnalise, item._context);
+            const cat = normalizeKey(result.category);
+            if (cat && cat !== 'indefinido') {
+                list.push({
+                    OS: item.OS, text: item._textoAnalise, predictedCategory: cat,
+                    reason: result.reason || 'Padrão identificado pela IA', originalItem: item
+                });
+            }
+        });
+        aiSuggestionsList.value = list;
+        aiModal.show = true;
+      };
+      const closeAiModal = () => { aiModal.show = false; };
+      const acceptSuggestion = (sugg) => {
+          decidir(sugg.originalItem, sugg.predictedCategory);
+          aiSuggestionsList.value = aiSuggestionsList.value.filter(i => i.OS !== sugg.OS);
+      };
+      const discardSuggestion = (sugg) => {
+          aiSuggestionsList.value = aiSuggestionsList.value.filter(i => i.OS !== sugg.OS);
+      };
+      const correctSuggestion = (sugg, correctStatus) => {
+          decidir(sugg.originalItem, correctStatus);
+          aiSuggestionsList.value = aiSuggestionsList.value.filter(i => i.OS !== sugg.OS);
+          showToast(`Corrigido para ${formatStatus(correctStatus)}`, 'success');
+      };
+      const acceptAllAi = () => {
+          aiSuggestionsList.value.forEach(s => decidir(s.originalItem, s.predictedCategory));
+          aiModal.show = false;
+          showToast('Todas as sugestões foram aplicadas!');
+      };
+
+      // --- COMMON ACTIONS ---
       const openCfDetails = (item) => { cfModal.item = item; cfModal.show = true; };
       const closeCfModal = () => { cfModal.show = false; cfModal.item = null; };
       const openOccurrenceDetails = (subRecord) => { occurrenceModal.item = subRecord; occurrenceModal.show = true; };
@@ -349,6 +600,8 @@
           else selectedRows.value.push(id);
       };
 
+      const isSelected = (item) => selectedRows.value.includes(item.OS);
+
       const toggleSelectAll = () => {
           if (isAllSelected.value) selectedRows.value = [];
           else selectedRows.value = filteredData.value.map(i => i.OS);
@@ -362,8 +615,6 @@
           newData.forEach(item => {
               if (selectedRows.value.includes(item.OS)) {
                   item._status = targetKey;
-                  // Opcional: Treinar em massa
-                  // registrarAprendizado(item, targetKey);
                   count++;
                   changed = true;
               }
@@ -377,50 +628,33 @@
           if(currentView.value === 'dashboard') updateCharts();
       };
       
-      const applyAiSuggestions = () => {
-          const data = sessionData.value;
-          let count = 0;
-          let changed = false;
-          
-          data.forEach(item => {
-              const sugg = normalizeKey(item._sugestao);
-              const status = normalizeKey(item._status);
-              
-              if (status === 'pendente' && sugg && sugg !== 'indefinido') {
-                  item._status = sugg;
-                  registrarAprendizado(item, sugg);
-                  count++;
-                  changed = true;
-              }
-          });
-          
-          if (changed) {
-              triggerRef(sessionData);
-              if (window.MLService) runBackgroundML();
-              if(currentView.value === 'dashboard') updateCharts();
-              showToast(`${count} sugestões aplicadas e salvas para treino!`, 'success');
-          } else {
-              showToast('Nenhuma sugestão confiável pendente para aplicar.', 'warning');
-          }
-      };
-
       const decidir = (item, decision) => {
-        const oldStatus = item._status;
-        const normDecision = normalizeKey(decision);
-        item._status = normDecision;
+        const targetIndex = sessionData.value.findIndex(i => i.OS === item.OS);
         
-        registrarAprendizado(item, normDecision);
-        
-        if (window.MLService) runBackgroundML();
-
-        if(currentView.value === 'dashboard') updateCharts();
-        
-        showToast(`Definido como: ${formatStatus(normDecision)}`, 'success', () => {
-            item._status = oldStatus;
-            triggerRef(sessionData); 
+        if (targetIndex === -1) {
+            console.warn("Item não encontrado para decisão:", item.OS);
+            item._status = normalizeKey(decision);
+        } else {
+            const targetItem = sessionData.value[targetIndex];
+            const oldStatus = targetItem._status;
+            const normDecision = normalizeKey(decision);
+            
+            targetItem._status = normDecision;
+            registrarAprendizado(targetItem, normDecision);
+            
+            if (window.MLService) runBackgroundML();
             if(currentView.value === 'dashboard') updateCharts();
-        });
-        triggerRef(sessionData);
+            
+            showToast(`Definido como: ${formatStatus(normDecision)}`, 'success', () => {
+                const idx = sessionData.value.findIndex(i => i.OS === item.OS);
+                if(idx !== -1) {
+                    sessionData.value[idx]._status = oldStatus;
+                    triggerRef(sessionData);
+                    if(currentView.value === 'dashboard') updateCharts();
+                }
+            });
+            triggerRef(sessionData);
+        }
       };
 
       const showToast = (message, type = 'success', undoAction = null) => {
@@ -434,6 +668,15 @@
       const closeModal = () => modal.show = false;
       const confirmModal = () => { if(modal.onConfirm) modal.onConfirm(); closeModal(); };
       
+      const openExportModal = (type) => { exportModal.type = type; exportModal.show = true; };
+      const closeExportModal = () => { exportModal.show = false; };
+      const toggleAllCsvColumns = (v) => { selectedCsvColumns.value = v ? [...csvColumns.value] : []; };
+
+      const exportarCSV = () => ReportService.exportarCSV(sessionData.value);
+      const exportarPDF = (type) => ReportService.exportarPDF(sessionData.value, stats.value, type);
+      const generateCsv = () => { ReportService.exportarCSV(sessionData.value, selectedCsvColumns.value); closeExportModal(); };
+      const generatePdf = (type) => { ReportService.exportarPDF(sessionData.value, stats.value, type); closeExportModal(); };
+
       const handleDrop = (e) => {
           isDragging.value = false;
           const files = e.dataTransfer.files;
@@ -477,256 +720,82 @@
           });
       };
 
-      // --- DATA LOGIC ---
-      const handleFileUpload = (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        loading.value = true; statusMessage.value = 'Lendo arquivo...';
-        const reader = new FileReader();
-        reader.onload = (evt) => {
-          try {
-            const workbook = XLSX.read(evt.target.result, { type: 'array' });
-            const rawData = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { header: 1 });
-            const { dadosFormatados } = processarHeader(rawData);
-            
-            // Filtro de Quarentena melhorado com Toggle e Exclusões Inteligentes
-            const filtered = dadosFormatados.filter(row => {
-               // Se o toggle estiver DESLIGADO, aceita tudo
-               if (!useQuarantineFilter.value) return true;
+      // --- COMPUTED PROPERTIES ---
+      const isAllSelected = computed(() => {
+          if ((filteredData.value || []).length === 0) return false;
+          return filteredData.value.every(item => selectedRows.value.includes(item.OS));
+      });
+      
+      const aiKnowledgeCount = computed(() => localTrainingData.value.length);
 
-               // Procura colunas candidatas
-               const entry = Object.entries(row).find(([k]) => {
-                   const norm = normalizeHeader(k);
-                   // Deve ter QUARENTENA no nome
-                   // MAS NÃO pode ter DATA, TECNICO, DESCRICAO ou OBS (para evitar falsos positivos)
-                   return norm.includes('QUARENTENA') && 
-                          !norm.includes('DATA') && 
-                          !norm.includes('TECNICO') && 
-                          !norm.includes('DESCRICAO') &&
-                          !norm.includes('OBS');
-               });
-
-               const val = entry?.[1];
-
-               // Fallback: Se não achou NENHUMA coluna que pareça um flag booleano (ex: só tem Data Quarentena),
-               // assume que é para importar TUDO (comportamento seguro)
-               if (!entry) return true;
-
-               // Se achou uma coluna válida, aplica o filtro estrito
-               return val ? String(val).toUpperCase().trim() === 'SIM' : false; 
-            });
-
-            const osList = extractOS(filtered);
-            if (osList.length === 0) {
-              showToast("Nenhuma coluna de OS encontrada no arquivo.", "error");
-              loading.value = false; statusMessage.value = 'Aguardando...';
-              return;
-            }
-            statusMessage.value = `Buscando ${osList.length} itens...`;
-            runGoogle('buscarDadosPorListaOS', osList)
-              .then(data => processServerData(data, osList))
-              .catch(err => showToast("Erro: " + err, "error"))
-              .finally(() => { loading.value = false; statusMessage.value = 'Pronto'; });
-          } catch (err) {
-            console.error(err); showToast("Erro ao ler arquivo", "error"); loading.value = false;
-          }
-        };
-        reader.readAsArrayBuffer(file);
-        e.target.value = '';
-      };
-
-      const fetchByPeriod = () => {
-        if (!filters.start || !filters.end) return showToast("Defina as datas.", "error");
-        loading.value = true; statusMessage.value = 'Buscando...';
-        runGoogle('buscarDadosPorPeriodo', filters.start, filters.end)
-          .then(data => { processServerData(data); updateCharts(); })
-          .catch(err => showToast("Erro: " + err, "error"))
-          .finally(() => { loading.value = false; statusMessage.value = 'Pronto'; });
-      };
-
-      const processServerData = (data, requestedList = null) => {
-        const safeData = data || [];
-        if (requestedList && requestedList.length > 0) {
-           const foundSet = new Set(safeData.map(d => {
-              const val = d.OS || d['NÚMERO OS'] || d.ID || d['_idx_os'];
-              return val ? String(val).trim().toUpperCase() : '';
-           }));
-           const missing = requestedList.filter(os => !foundSet.has(String(os).trim().toUpperCase()));
-           const missingRecords = missing.map(os => ({
-              OS: os, 'NOME DO TÉCNICO': 'NÃO ENCONTRADO', 'QUAL PROBLEMA?': 'DADOS NÃO LOCALIZADOS',
-              'DETALHE O PROBLEMA ENCONTRADO': 'Esta OS consta no arquivo de upload mas não foi encontrada na base de Divergência.',
-              'FOTO DA AVARIA!': null, 'CF PRODUTO ANTIGO': '', 'CF PRODUTO NOVO': '',
-              _custoAntigo: 0, _custoNovo: 0, _custoTotal: 0, _status: 'pendente', _sugestao: 'indefinido', _subRecords: []
-           }));
-           safeData.push(...missingRecords);
+      const completedCount = computed(() => (sessionData.value || []).filter(i => normalizeKey(i._status) !== 'pendente').length);
+      const progressPercent = computed(() => {
+          const total = (sessionData.value || []).length;
+          if (total === 0) return 0;
+          return (completedCount.value / total) * 100;
+      });
+      
+      const filteredData = computed(() => {
+        let data = sessionData.value || [];
+        if (activeFilter.value === 'indefinido') {
+            data = data.filter(item => 
+              normalizeKey(item._status) === 'pendente' && 
+              (normalizeKey(item._sugestao) === 'indefinido' || !item._sugestao)
+            );
+        } else if (activeFilter.value !== 'todos') {
+            data = data.filter(item => normalizeKey(item._status) === activeFilter.value);
         }
-        if (safeData.length === 0) { showToast("Nenhum dado encontrado.", "error"); return; }
+        if (searchQuery.value) {
+          const q = searchQuery.value.toLowerCase();
+          data = data.filter(item => 
+            (item.OS || '').toLowerCase().includes(q) || 
+            (item['NOME DO TÉCNICO'] || '').toLowerCase().includes(q)
+          );
+        }
+        if (activeFilter.value === 'todos') {
+             return [...data].sort((a, b) => (normalizeKey(a._status) === 'pendente' ? -1 : 1));
+        }
+        return data;
+      });
+
+      const stats = computed(() => {
+        let approvedCount = 0, approvedPartsCost = 0, partnerCount = 0, partnerCost = 0, rejectedCount = 0, rejectedCost = 0;
+        let assemblyCost = 0;
+
+        (sessionData.value || []).forEach(item => {
+          const cost = item._custoTotal || 0;
+          const s = normalizeKey(item._status);
+          
+          if (s === 'ok_pagamento') { 
+              approvedCount++; 
+              approvedPartsCost += cost; 
+              assemblyCost += AppConfig.TAXA_MONTAGEM;
+          }
+          else if (s === 'avaria_parceiro') { partnerCount++; partnerCost += cost; }
+          else if (s === 'nao_pagar') { rejectedCount++; rejectedCost += cost; }
+        });
         
-        const grouped = {};
-        safeData.forEach(d => {
-          const rawOS = d.OS || d['NÚMERO OS'] || d.ID || d['_idx_os'] || 'N/A';
-          const osKey = String(rawOS).trim().toUpperCase();
-          if (!grouped[osKey]) grouped[osKey] = [];
-          grouped[osKey].push(d);
-        });
-
-        sessionData.value = Object.keys(grouped).map(osKey => {
-          const records = grouped[osKey];
-          let totalCustoAntigo = 0, totalCustoNovo = 0, totalCustoTotal = 0;
-          let fullText = "";
-          let techs = new Set(), photos = [];
-          
-          const subRecords = records.map((r, i) => {
-              const cTotal = parseFloat(r._custoTotal) || 0;
-              totalCustoTotal += cTotal;
-              totalCustoAntigo += (parseFloat(r._custoAntigo)||0);
-              totalCustoNovo += (parseFloat(r._custoNovo)||0);
-              
-              const prob = r['_idx_problema'] || r['QUAL PROBLEMA?'] || '';
-              const det = r['_idx_detalhe'] || r['DETALHE O PROBLEMA ENCONTRADO'] || '';
-              const tec = r['_idx_tecnico'] || r['NOME DO TÉCNICO'] || 'N/A';
-              
-              fullText += ` ${prob} ${det}`;
-              if (tec !== 'N/A') techs.add(tec);
-              
-              const photo = r['FOTO DA AVARIA!'];
-              if (photo && photo.startsWith('http')) photos.push(photo);
-
-              return { 
-                id: i + 1, problema: prob, detalhe: det, custo: cTotal,
-                processo: r['_idx_processo'], os: osKey,
-                
-                // ALTERAÇÃO: Adicionando dados individuais dos CFs e valores
-                cfAntigo: r['CF PRODUTO ANTIGO'],
-                cfNovo: r['CF PRODUTO NOVO'],
-                vlrAntigo: parseFloat(r._custoAntigo)||0,
-                vlrNovo: parseFloat(r._custoNovo)||0,
-                
-                inicio: r['_idx_inicio'], fim: r['_idx_fim'],
-                pedido: r['_idx_pedido'], produtoDiv: r['_idx_prod_div'],
-                tipoProb: r['_idx_tipo_problema'] || r['_idx_tipo_troca'], 
-                tipoTroca: r['_idx_tipo_troca'], avariaCust: r['_idx_avaria_cust']
-              };
-          });
-          
-          const r0 = records[0];
-          
-          // CONTEXTO DE REGRAS (PESOS)
-          // Agrega valores de todos os registros da OS para garantir que se houver um SIM, ele seja capturado
-          const allAvaria = records.map(r => r['_idx_avaria_cust'] || '').join(' ');
-          const allProcesso = records.map(r => r['_idx_processo'] || '').join(' ');
-          
-          const context = {
-            avariaCust: allAvaria,
-            processo: allProcesso
-          };
-
-          // PREDIÇÃO HÍBRIDA
-          let sugestaoInicial = null;
-          if (window.MLService && fullText.length > 5) {
-             sugestaoInicial = window.MLService.predict(fullText.trim(), context);
-          }
-          
-          return {
-            OS: osKey, 'NOME DO TÉCNICO': Array.from(techs).join(', '),
-            'CF PRODUTO ANTIGO': r0['CF PRODUTO ANTIGO'], 'CF PRODUTO NOVO': r0['CF PRODUTO NOVO'],
-            _subRecords: subRecords, _photos: photos,
-            _custoAntigo: totalCustoAntigo, _custoNovo: totalCustoNovo, _custoTotal: totalCustoTotal,
-            _textoAnalise: fullText.trim(),
-            _sugestao: normalizeKey(records[0]._sugestao || sugestaoInicial), // Normaliza carga inicial
-            _status: normalizeKey(records[0]._status || 'pendente'),
-            _isDup: records.length > 1, _dupCount: records.length,
-            _context: context // Salva contexto para uso no background ML
-          };
-        });
-
-        triggerRef(sessionData);
-        runBackgroundML();
-      };
-
-      const runBackgroundML = async () => {
-          if (!window.MLService) return;
-          const data = sessionData.value;
-          const chunkSize = 20; 
-          
-          const processChunk = (startIndex) => {
-              if (startIndex >= data.length) return;
-              let madeChanges = false;
-              const end = Math.min(startIndex + chunkSize, data.length);
-              
-              for (let i = startIndex; i < end; i++) {
-                  const item = data[i];
-                  // Passa o contexto (regras) também no processamento background
-                  // Re-processa inclusive 'indefinido' pois o modelo pode ter aprendido
-                  if ((!item._sugestao || normalizeKey(item._sugestao) === 'indefinido') && item._textoAnalise && item._textoAnalise.length > 5) {
-                      const prediction = window.MLService.predict(item._textoAnalise, item._context);
-                      const normPrediction = normalizeKey(prediction);
-                      if (normPrediction && normPrediction !== normalizeKey(item._sugestao)) {
-                          item._sugestao = normPrediction;
-                          madeChanges = true;
-                      }
-                  }
-              }
-              if (madeChanges) triggerRef(sessionData);
-              requestAnimationFrame(() => processChunk(end));
-          };
-          processChunk(0);
-      };
-
-      const iniciarSalvamento = () => {
-          if (completedCount.value === 0) {
-              openModal("Salvar Sessão Vazia?", "Nenhum item foi classificado. Deseja salvar mesmo assim?", salvarSessao);
-          } else {
-              salvarSessao();
-          }
-      };
-
-      const salvarSessao = () => {
-        loading.value = true;
-        const name = editingSessionName.value || `Auditoria ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
-        const isUpdate = !!editingSessionName.value;
-        runGoogle('salvarSessaoNaPlanilha', name, JSON.parse(JSON.stringify(sessionData.value)), isUpdate)
-          .then(res => {
-            showToast("Sessão salva com sucesso!", "success");
-            if (!isUpdate) editingSessionName.value = res.nomeAba;
-          })
-          .catch(err => showToast("Erro ao salvar: " + err, "error"))
-          .finally(() => loading.value = false);
-      };
-
-      const carregarHistorico = () => {
-        historyLoading.value = true;
-        runGoogle('listarSessoesSalvas').then(list => historyList.value = list).finally(() => historyLoading.value = false);
-      };
-      const loadSession = (name) => {
-        loading.value = true;
-        runGoogle('carregarSessaoAntiga', name).then(data => {
-            editingSessionName.value = name;
-            processServerData(data);
-            currentView.value = 'dashboard';
-            setTimeout(updateCharts, 100);
-          }).catch(err => showToast("Erro: " + err, "error")).finally(() => loading.value = false);
-      };
-
-      // --- EXPORT FUNCTIONS ---
-      const exportarCSV = () => ReportService.exportarCSV(sessionData.value);
-      const exportarPDF = () => ReportService.exportarPDF(sessionData.value, stats.value);
+        return { approvedCount, approvedPartsCost, assemblyCost, totalCost: approvedPartsCost + assemblyCost, partnerCount, partnerCost, rejectedCount, rejectedCost };
+      });
 
       return {
         currentView, viewTitle, loading, statusMessage, sessionData, filteredData,
         filters, historyList, historyLoading, editingSessionName, searchQuery,
-        stats, completedCount, progressPercent, fileInput, toasts, activeFilter, availableFilters, modal, isDragging,
-        selectedRows, isAllSelected, focusMode, hoveredItem,
-        cfModal, occurrenceModal, 
+        stats, completedCount, progressPercent, fileInput, toasts, activeFilter, availableFilters, 
+        modal, exportModal, cfModal, occurrenceModal, aiModal, aiSuggestionsList, 
+        judgeState, 
+        isDragging, selectedRows, isAllSelected, focusMode, hoveredItem,
+        csvColumns, selectedCsvColumns,
+        historyViewMode, historyDetailData, historySelectedSession, historyGlobalStats, backToHistoryList, accuracyStats,
         handleFileUpload, handleDrop, fetchByPeriod, setMonth, carregarHistorico, loadSession,
         decidir, bulkDecide, toggleSelect, toggleSelectAll, isSelected,
         iniciarSalvamento, salvarSessao, exportarCSV, exportarPDF, removeToast, closeModal, confirmModal,
-        openCfDetails, closeCfModal, kabumUrl,
-        openOccurrenceDetails, closeOccurrenceModal,
-        toggleFocusMode,
-        applyAiSuggestions, aiKnowledgeCount, // Novos returns
+        openExportModal, closeExportModal, toggleAllCsvColumns, generateCsv, generatePdf,
+        openCfDetails, closeCfModal, kabumUrl, openOccurrenceDetails, closeOccurrenceModal,
+        openAiModal, closeAiModal, acceptSuggestion, discardSuggestion, acceptAllAi, correctSuggestion, 
+        loadFileForJudge, runJudge, downloadJudgeReport, toggleFocusMode, aiKnowledgeCount, 
         formatMoney, formatStatus, getRowClass, getBtnClass, getBadgeStyle, navClass, getToastClass, getToastIcon,
-        processarHeader, extractOS, useQuarantineFilter // Expondo o novo filtro
+        processarHeader, extractOS, useQuarantineFilter, normalizeKey
       };
     }
   }).mount('#app');
