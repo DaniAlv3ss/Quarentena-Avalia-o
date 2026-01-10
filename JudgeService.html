@@ -1,0 +1,168 @@
+<script>
+/**
+ * JUDGE SERVICE
+ * Responsável por cruzar dados de auditoria interna vs parceiro,
+ * normalizar diferentes nomenclaturas e gerar vereditos justificados.
+ */
+window.JudgeService = {
+  
+  // Dicionário de equivalência para normalizar "Dialetos" diferentes (Ex: Sim, Apto, OK -> Aprovado)
+  equivalencias: {
+    aprovado: ['ok_pagamento', 'sim', 's', 'apto', 'pagar', 'aprovado', 'ok', 'procedente'],
+    reprovado: ['nao_pagar', 'nao', 'n', 'inapto', 'reprovado', 'improcedente', 'negado'],
+    parceiro: ['avaria_parceiro', 'parceiro', 'avaria', 'dano fisico', 'cliente']
+  },
+
+  normalizarStatus(valor) {
+    if (!valor) return 'indefinido';
+    const v = String(valor).toLowerCase().trim();
+    
+    if (this.equivalencias.aprovado.some(t => v === t || v.includes(t))) return 'ok_pagamento';
+    if (this.equivalencias.parceiro.some(t => v.includes(t))) return 'avaria_parceiro';
+    if (this.equivalencias.reprovado.some(t => v === t || v.includes(t))) return 'nao_pagar';
+    
+    return 'indefinido';
+  },
+
+  formatStatus(key) {
+    const map = {
+      'ok_pagamento': 'APTO (SIM)',
+      'avaria_parceiro': 'PARCEIRO',
+      'nao_pagar': 'INAPTO (NÃO)',
+      'indefinido': 'DESCONHECIDO'
+    };
+    return map[key] || key;
+  },
+
+  /**
+   * Compara duas listas de objetos baseados em configurações de coluna dinâmica
+   */
+  julgar(dadosInternos, dadosParceiro, config) {
+    // config = { colOsInt, colStatusInt, colOsParceiro, colStatusParceiro }
+    
+    const mapaInterno = new Map();
+    const resultados = [];
+    
+    // 1. Indexar Base Interna
+    dadosInternos.forEach(row => {
+      const os = String(row[config.colOsInt]).trim().toUpperCase();
+      if(os) mapaInterno.set(os, row);
+    });
+
+    // 2. Cruzar com Base Parceiro
+    dadosParceiro.forEach(rowParceiro => {
+      const os = String(rowParceiro[config.colOsParceiro]).trim().toUpperCase();
+      if (!os) return;
+
+      const rowInterna = mapaInterno.get(os);
+      
+      // Decisões Originais
+      const statusParceiroRaw = rowParceiro[config.colStatusParceiro];
+      const statusInternoRaw = rowInterna ? rowInterna[config.colStatusInt] : 'NÃO ENCONTRADO';
+
+      // Decisões Normalizadas
+      const statusParceiroNorm = this.normalizarStatus(statusParceiroRaw);
+      const statusInternoNorm = rowInterna ? this.normalizarStatus(statusInternoRaw) : 'nao_encontrado';
+
+      const match = statusParceiroNorm === statusInternoNorm;
+      
+      // Gerar Justificativa do Juiz
+      let veredito = '';
+      let acaoSugerida = '';
+
+      if (!rowInterna) {
+        veredito = 'OS consta apenas na base do Parceiro. Verificar se foi auditada.';
+        acaoSugerida = 'Auditar';
+      } else if (match) {
+        veredito = `Consenso. Ambas as partes classificaram como ${this.formatStatus(statusInternoNorm)}.`;
+        acaoSugerida = 'Arquivar';
+      } else {
+        // Lógica de Conflito
+        if (statusInternoNorm === 'ok_pagamento' && statusParceiroNorm !== 'ok_pagamento') {
+          veredito = `Divergência: Interno aprovou pagamento, mas parceiro recusou/classificou como ${statusParceiroRaw}.`;
+          acaoSugerida = 'Investigar (Possível erro nosso ou do parceiro)';
+        } else if (statusInternoNorm !== 'ok_pagamento' && statusParceiroNorm === 'ok_pagamento') {
+          veredito = `Divergência: Interno reprovou (${statusInternoRaw}), mas parceiro está cobrando (Apto).`;
+          acaoSugerida = 'Contestar Cobrança';
+        } else {
+          veredito = `Divergência de classificação: ${statusInternoRaw} vs ${statusParceiroRaw}.`;
+          acaoSugerida = 'Analisar';
+        }
+      }
+
+      resultados.push({
+        OS: os,
+        StatusInterno: this.formatStatus(statusInternoNorm),
+        StatusParceiro: this.formatStatus(statusParceiroNorm),
+        OriginalInterno: statusInternoRaw,
+        OriginalParceiro: statusParceiroRaw,
+        Match: match,
+        Veredito: veredito,
+        Acao: acaoSugerida,
+        DadosInternos: rowInterna,
+        DadosParceiro: rowParceiro
+      });
+      
+      // Remove do mapa para saber o que sobrou (sobras internas)
+      mapaInterno.delete(os);
+    });
+
+    // 3. Processar Sobras Internas (OS que temos mas o parceiro não mandou)
+    mapaInterno.forEach((rowInterna, os) => {
+       const statusInternoRaw = rowInterna[config.colStatusInt];
+       const statusInternoNorm = this.normalizarStatus(statusInternoRaw);
+
+       resultados.push({
+        OS: os,
+        StatusInterno: this.formatStatus(statusInternoNorm),
+        StatusParceiro: 'NÃO ENCONTRADO',
+        OriginalInterno: statusInternoRaw,
+        OriginalParceiro: '-',
+        Match: false,
+        Veredito: 'OS consta na base Interna mas não no arquivo do Parceiro.',
+        Acao: 'Verificar Envio',
+        DadosInternos: rowInterna,
+        DadosParceiro: null
+      });
+    });
+
+    return resultados;
+  },
+
+  exportarRelatorioJuiz(resultados) {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF('l', 'mm', 'a4'); // Paisagem para caber justificativa
+    
+    doc.setFontSize(16);
+    doc.text("Relatório de Auditoria Cruzada (Juiz)", 14, 15);
+    doc.setFontSize(10);
+    doc.text(`Gerado em: ${new Date().toLocaleString()}`, 14, 22);
+
+    const rows = resultados.map(r => [
+      r.OS,
+      r.StatusInterno,
+      r.StatusParceiro,
+      r.Match ? 'SIM' : 'NÃO',
+      r.Veredito
+    ]);
+
+    doc.autoTable({
+      startY: 30,
+      head: [['OS', 'Decisão Interna', 'Decisão Parceiro', 'Match', 'Justificativa do Juiz']],
+      body: rows,
+      theme: 'grid',
+      headStyles: { fillColor: [30, 41, 59] },
+      columnStyles: {
+        0: { cellWidth: 30 },
+        1: { cellWidth: 30 },
+        2: { cellWidth: 30 },
+        3: { cellWidth: 15 },
+        4: { cellWidth: 'auto' }
+      },
+      styles: { fontSize: 8, overflow: 'linebreak' }
+    });
+
+    doc.save(`Relatorio_Juiz_${new Date().toISOString().slice(0,10)}.pdf`);
+  }
+};
+</script>
