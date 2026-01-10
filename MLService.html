@@ -1,10 +1,10 @@
 <script>
   /**
-   * SERVIÇO DE MACHINE LEARNING HÍBRIDO (Regras + Naive Bayes)
-   * Ajustado para dar peso a componentes críticos (CPU, GPU, MOBO).
+   * SERVIÇO DE MACHINE LEARNING HÍBRIDO (Regras + Naive Bayes + Auditoria de Contradição)
+   * ATUALIZADO: Inclui detector de conflito entre Checkbox (Não) e Texto (Sim).
    */
 window.MLService = {
-  // Configurações
+  // Configurações e Dicionários
   config: {
     synonyms: {
       'vga': 'gpu', 'placa_video': 'gpu', 'video': 'gpu', 'rtx': 'gpu', 'gtx': 'gpu', 'radeon': 'gpu', 'geforce': 'gpu',
@@ -15,17 +15,16 @@ window.MLService = {
       'fonte': 'psu',
       'cooler': 'refrigeracao', 'fan': 'refrigeracao', 'ventoinha': 'refrigeracao', 'water': 'refrigeracao', 'wc': 'refrigeracao', 'bomba': 'refrigeracao',
       
-      'quebrado': 'dano_fisico', 'amassado': 'dano_fisico', 'trincado': 'dano_fisico', 'entortado': 'dano_fisico', 'torto': 'dano_fisico',
+      'quebrado': 'dano_fisico', 'amassado': 'dano_fisico', 'trincado': 'dano_fisico', 'entortado': 'dano_fisico', 'torto': 'dano_fisico', 'riscado': 'dano_fisico',
       'incompativel': 'incompatibilidade', 'pequeno': 'incompatibilidade', 'cabe': 'incompatibilidade', 'suporta': 'incompatibilidade',
       'travando': 'falha_funcional', 'artefato': 'falha_funcional', 'azul': 'falha_funcional'
     },
     
-    // Features que multiplicam o peso da evidência (importantes para a regra de negócio)
+    // Features que multiplicam o peso da evidência na IA
     importantFeatures: new Set([
         'incompatibilidade', 'nao_suporta', 'nao_cabe', 
-        'dano_fisico', 'amassado', 'quebrado', 'oxidacao',
+        'dano_fisico', 'amassado', 'quebrado', 'oxidacao', 'riscado',
         'ram', 'tela_azul', 'curto', 'queimado',
-        // Adicionados como PESO IMPORTANTE devido à regra de negócio e valor agregado
         'gpu', 'cpu', 'placamae' 
     ]),
     
@@ -76,41 +75,23 @@ window.MLService = {
 
       const tempWordCounts = {}; 
 
-      // Mapeamento: Texto Humano -> Chave do Sistema
       const labelMap = {
-          'aprovado pagamento': 'ok_pagamento',
-          'pagar': 'ok_pagamento',
-          'ok_pagamento': 'ok_pagamento',
-          'ok': 'ok_pagamento',
-
-          'reprovado pagamento': 'nao_pagar',
-          'reprovado': 'nao_pagar',
-          'nao_pagar': 'nao_pagar',
-          'não pagar': 'nao_pagar',
-
-          'avaria customiza': 'avaria_parceiro',
-          'parceiro': 'avaria_parceiro',
-          'avaria_parceiro': 'avaria_parceiro',
-          'avaria': 'avaria_parceiro'
+          'aprovado pagamento': 'ok_pagamento', 'pagar': 'ok_pagamento', 'ok_pagamento': 'ok_pagamento', 'ok': 'ok_pagamento',
+          'reprovado pagamento': 'nao_pagar', 'reprovado': 'nao_pagar', 'nao_pagar': 'nao_pagar', 'não pagar': 'nao_pagar',
+          'avaria customiza': 'avaria_parceiro', 'parceiro': 'avaria_parceiro', 'avaria_parceiro': 'avaria_parceiro', 'avaria': 'avaria_parceiro'
       };
 
       dataset.forEach(originalItem => {
         const item = { ...originalItem };
         
-        // Verifica regras hardcoded nos dados históricos para garantir pureza
         const processo = (item.processo || item['Processo?'] || '').toString().toLowerCase();
         const avaria = (item.avariaCust || item['Avaria customiza?'] || '').toString().toLowerCase();
         let rawCat = (item.categoria || item.Considerações || '').toString().toLowerCase().trim();
 
-        if (processo.includes('antes')) {
-            rawCat = 'nao_pagar'; 
-        } else if (avaria.includes('sim')) {
-            rawCat = 'avaria_parceiro';
-        }
+        if (processo.includes('antes')) rawCat = 'nao_pagar'; 
+        else if (avaria.includes('sim')) rawCat = 'avaria_parceiro';
 
         const finalCat = labelMap[rawCat];
-        
-        // Ignora categorias desconhecidas ou 'indefinido'
         if (!finalCat || finalCat === 'indefinido') return;
 
         if(!this.categories[finalCat]) {
@@ -126,7 +107,6 @@ window.MLService = {
         tokens.forEach(token => {
            tempWordCounts[token] = (tempWordCounts[token] || 0) + 1;
            let weight = 1;
-           // Aplica peso x4 se for uma feature importante (incluindo agora CPU, GPU, MOBO)
            if (window.MLService.config.importantFeatures.has(token)) weight = 4;
 
            if(!this.categories[finalCat].wordCounts[token]) this.categories[finalCat].wordCounts[token] = 0;
@@ -135,7 +115,6 @@ window.MLService = {
         });
       });
 
-      // Limpeza de Ruído (palavras muito raras)
       const minFreq = window.MLService.config.minWordFrequency;
       Object.keys(this.categories).forEach(cat => {
           const catData = this.categories[cat];
@@ -152,27 +131,25 @@ window.MLService = {
     },
     
     classify(text, forbiddenCategories = []) {
-      if (!text || this.docCount === 0) return 'indefinido';
+      if (!text || this.docCount === 0) return { category: 'indefinido', reason: 'Sem dados de treino' };
       const tokens = this.tokenizer.tokenize(text);
-      if (tokens.length === 0) return 'indefinido';
+      if (tokens.length === 0) return { category: 'indefinido', reason: 'Texto insuficiente' };
 
       let bestCategory = null;
       let maxProb = -Infinity;
       let secondMaxProb = -Infinity; 
       const vocabSize = this.globalVocabulary.size;
+      const evidences = [];
 
       Object.keys(this.categories).forEach(catName => {
         if (forbiddenCategories.includes(catName)) return;
 
         const catData = this.categories[catName];
-        // Probabilidade a priori (Prior)
         let logProb = Math.log(catData.docCount / this.docCount);
         
-        // Probabilidade das evidências (Likelihood)
         tokens.forEach(token => {
           if (!this.globalVocabulary.has(token)) return; 
           const wordCount = catData.wordCounts[token] || 0;
-          // Laplace Smoothing (+1)
           const pWord = (wordCount + 1) / (catData.totalWords + vocabSize + 1);
           logProb += Math.log(pWord);
         });
@@ -187,33 +164,98 @@ window.MLService = {
       });
       
       const gap = maxProb - secondMaxProb;
-      if (isNaN(gap) || gap < window.MLService.config.confidenceThreshold) {
-          return 'indefinido';
-      }
+      const confident = !isNaN(gap) && gap >= window.MLService.config.confidenceThreshold;
       
-      return bestCategory || 'indefinido';
+      if (bestCategory && confident) {
+          const catData = this.categories[bestCategory];
+          tokens.forEach(t => {
+             if ((catData.wordCounts[t] && catData.wordCounts[t] > 0) || window.MLService.config.importantFeatures.has(t)) {
+                 evidences.push(t);
+             }
+          });
+      }
+
+      const uniqueEvidence = [...new Set(evidences)].slice(0, 5).join(', ');
+
+      return {
+          category: confident ? bestCategory : 'indefinido',
+          reason: confident ? `Padrão de palavras: ${uniqueEvidence}` : 'Confiança baixa',
+          confidence: gap
+      };
     }
   },
 
   train(data) { this.model.train(data); },
   
+  // --- NOVA FUNÇÃO: DETECTOR DE CONTRADIÇÃO ---
+  detectarContradicao(text, context) {
+      if (!text) return null;
+      
+      // 1. Normaliza o texto (remove acentos e deixa minúsculo)
+      const t = text.toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      
+      // 2. Dicionários de "Crime" e "Agente"
+      // Palavras que indicam QUEM causou o dano
+      const agentes = ['tecnico', 'tc ', 'montador', 'montagem', 'manuseio', 'organizacao', 'manuzeio'];
+      
+      // Palavras que indicam O QUE aconteceu (Dano físico/Ação)
+      const acoesDano = ['amassou', 'amassado', 'entortou', 'entortado', 'quebrou', 'quebrado', 'cortou', 'cortado', 'riscou', 'riscado', 'derrubou', 'espanou', 'pino torto', 'pino amassado', 'avaria', 'rompido', 'trincado'];
+
+      // 3. Verifica se o texto contém Agente E Ação
+      const temAgente = agentes.some(ag => t.includes(ag));
+      const temDano = acoesDano.some(ac => t.includes(ac));
+      const isFabrica = t.includes('fabrica'); // Evita falso positivo tipo "defeito de fabrica"
+
+      // 4. Lógica Sherlock Holmes:
+      // Se tem Agente + Dano e NÃO é defeito de fábrica, é Parceiro.
+      if (temAgente && temDano && !isFabrica) {
+          return {
+              category: 'avaria_parceiro',
+              reason: '🚩 CONTRADIÇÃO: Texto descreve avaria causada pelo técnico/processo interno.',
+              confidence: 5.0, // Confiança Máxima
+              isContradiction: true
+          };
+      }
+      
+      // Se apenas menciona o agente em contexto de quarentena, já é forte indício
+      if (temAgente && !isFabrica) {
+           return {
+              category: 'avaria_parceiro',
+              reason: 'Hard Rule: Menção de intervenção técnica (Montagem/Manuseio).',
+              confidence: 4.5
+          };
+      }
+
+      return null;
+  },
+
   predict(text, context) {
       let forbidden = [];
       
-      // REGRAS RÍGIDAS DE NEGÓCIO (Sobrepõem a IA)
+      // 1. REGRAS RÍGIDAS DE METADADOS (O que o usuário marcou)
       if (context) {
-          const avaria = (context.avariaCust || context['Avaria customiza?'] || '').toString().trim().toLowerCase();
+          const avariaInput = (context.avariaCust || context['Avaria customiza?'] || '').toString().trim().toLowerCase();
           const processo = (context.processo || context['Processo?'] || '').toString().trim().toLowerCase();
 
-          // 1. Avaria Parceiro (Sim) -> SEMPRE "avaria_parceiro"
-          if (avaria.includes('sim')) return 'avaria_parceiro';
-          forbidden.push('avaria_parceiro'); 
-
-          // 2. Erro antes da montagem -> SEMPRE "nao_pagar"
-          if (processo.includes('antes')) return 'nao_pagar';
+          // Se o usuário marcou SIM, confiamos nele.
+          if (avariaInput.includes('sim')) {
+              return { category: 'avaria_parceiro', reason: 'Regra: Checkbox Avaria marcado como SIM' };
+          }
+          
+          // Se erro antes da montagem
+          if (processo.includes('antes')) {
+               return { category: 'nao_pagar', reason: 'Regra: Problema identificado ANTES da montagem' };
+          }
       }
 
-      // Se não caiu nas regras rígidas, a IA decide baseada no texto
+      // 2. DETECTOR DE CONTRADIÇÃO (Onde o usuário marcou NÃO ou esqueceu, mas o texto confessa)
+      // Esta etapa agora protege contra o erro humano de preenchimento
+      const resultadoContradicao = this.detectarContradicao(text, context);
+      if (resultadoContradicao) {
+          return resultadoContradicao;
+      }
+
+      // 3. IA (Naive Bayes) - Só roda se não caiu nas regras acima
       return this.model.classify(text, forbidden);
   }
 };
