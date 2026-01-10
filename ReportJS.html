@@ -88,11 +88,11 @@ window.ReportService = {
     doc.setDrawColor(200, 200, 200);
     doc.setFillColor(255, 255, 255);
     
-    // Card 1: Aprovados (Peça + Montagem)
+    // Card 1: Aprovados (ALTERADO: Apenas Montagem)
     this.drawCard(doc, 14, currentY, 55, 
-        "Custo Aprovado", 
-        this.formatCurrency(stats.approvedPartsCost + stats.assemblyCost),
-        `${stats.approvedCount} und. (R$ ${this.formatCurrency(stats.assemblyCost)} Montagem)`, 
+        "Custo Montagem", 
+        this.formatCurrency(stats.assemblyCost), // Valor direto da montagem
+        `${stats.approvedCount} aprovados x R$ 189,90`, 
         [22, 163, 74]); // Green
 
     // Card 2: Avaria Parceiro
@@ -127,14 +127,15 @@ window.ReportService = {
                 item.OS || item['NÚMERO OS'],
                 item['NOME DO TÉCNICO'] || '-',
                 problema.substring(0, 40) + (problema.length > 40 ? '...' : ''),
-                this.formatStatus(item._status),
-                this.formatCurrency(item._custoTotal)
+                this.formatStatus(item._status)
+                // REMOVIDO: this.formatCurrency(item._custoTotal)
             ];
         });
 
         doc.autoTable({
             startY: currentY,
-            head: [['OS', 'Técnico', 'Problema', 'Status', 'Custo Total']],
+            // REMOVIDO COLUNA CUSTO TOTAL
+            head: [['OS', 'Técnico', 'Problema', 'Status']],
             body: tableBody,
             theme: 'grid',
             headStyles: { fillColor: this.colors.header, textColor: 255, fontSize: 8 },
