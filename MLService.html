@@ -1,65 +1,105 @@
 <script>
   /**
-   * SERVIÇO DE MACHINE LEARNING HÍBRIDO (Regras + Naive Bayes + Auditoria de Contradição)
-   * ATUALIZADO: Inclui detector de conflito entre Checkbox (Não) e Texto (Sim).
+   * SERVIÇO DE MACHINE LEARNING HÍBRIDO (Regras + Naive Bayes + Auditoria)
+   * VERSÃO FINAL OTIMIZADA PARA PRODUÇÃO (PT-BR)
+   * * Funcionalidades:
+   * 1. Detector de Contradição: Identifica quando o técnico descreve avaria mas esquece o checkbox.
+   * 2. Tratamento de Negação: "não liga" vira token único "NOT_liga".
+   * 3. Cross-Features (Coluna J): Usa a família do produto para contextualizar o defeito.
+   * 4. Segmentação por Ocorrência: Analisa múltiplos defeitos na mesma OS individualmente (Divide & Conquer).
    */
 window.MLService = {
-  // Configurações e Dicionários
+  // --- CONFIGURAÇÕES E DICIONÁRIOS ---
   config: {
+    // Sinônimos (Normalização de Hardware e Defeitos)
     synonyms: {
       'vga': 'gpu', 'placa_video': 'gpu', 'video': 'gpu', 'rtx': 'gpu', 'gtx': 'gpu', 'radeon': 'gpu', 'geforce': 'gpu',
       'mobo': 'placamae', 'placa_mae': 'placamae', 'motherboard': 'placamae', 'mb': 'placamae', 'mainboard': 'placamae',
-      'processador': 'cpu', 'intel': 'cpu', 'amd': 'cpu', 'ryzen': 'cpu', 'core': 'cpu', 'athlon': 'cpu',
+      'processador': 'cpu', 'intel': 'cpu', 'amd': 'cpu', 'ryzen': 'cpu', 'core': 'cpu',
       'memoria': 'ram', 'memorias': 'ram', 'pente': 'ram',
       'hdd': 'disco', 'ssd': 'disco', 'nvme': 'disco',
       'fonte': 'psu',
       'cooler': 'refrigeracao', 'fan': 'refrigeracao', 'ventoinha': 'refrigeracao', 'water': 'refrigeracao', 'wc': 'refrigeracao', 'bomba': 'refrigeracao',
       
-      'quebrado': 'dano_fisico', 'amassado': 'dano_fisico', 'trincado': 'dano_fisico', 'entortado': 'dano_fisico', 'torto': 'dano_fisico', 'riscado': 'dano_fisico',
+      // Estados Físicos e Sintomas
+      'quebrado': 'dano_fisico', 'amassado': 'dano_fisico', 'trincado': 'dano_fisico', 'entortado': 'dano_fisico', 'torto': 'dano_fisico', 'riscado': 'dano_fisico', 'rompido': 'dano_fisico',
       'incompativel': 'incompatibilidade', 'pequeno': 'incompatibilidade', 'cabe': 'incompatibilidade', 'suporta': 'incompatibilidade',
-      'travando': 'falha_funcional', 'artefato': 'falha_funcional', 'azul': 'falha_funcional'
+      'travando': 'falha_funcional', 'artefato': 'falha_funcional', 'azul': 'falha_funcional', 'whea': 'falha_funcional'
     },
     
-    // Features que multiplicam o peso da evidência na IA
+    // Features que multiplicam o peso da evidência na IA (Peso 4x)
     importantFeatures: new Set([
         'incompatibilidade', 'nao_suporta', 'nao_cabe', 
         'dano_fisico', 'amassado', 'quebrado', 'oxidacao', 'riscado',
-        'ram', 'tela_azul', 'curto', 'queimado',
-        'gpu', 'cpu', 'placamae' 
+        'ram', 'tela_azul', 'curto', 'queimado', 'fogo',
+        'gpu', 'cpu', 'placamae', 'refrigeracao',
+        // Cross-Features (CTX_) terão peso 2x definidos no tokenizer
     ]),
     
     minWordFrequency: 2,
-    confidenceThreshold: 1.5 
+    confidenceThreshold: 1.4 
   },
 
+  // --- MOTOR DE INTELIGÊNCIA ---
   model: {
     globalVocabulary: new Set(),
     categories: {},
     docCount: 0,
     
     tokenizer: {
-      stopWords: new Set(['o','a','os','as','um','uma','de','do','da','em','no','na','por','pelo','pela','para','com','e','ou','que','seu','sua','ao','aos','foi','veio','esta','estava','ficou','tem','sendo']),
+      // Lista de StopWords focada em remover ruído de atendimento
+      stopWords: new Set([
+          'o','a','os','as','um','uma','de','do','da','em','no','na','por','pelo','pela','para','com','e','ou','que','seu','sua','ao','aos','foi','veio','esta','estava','ficou','tem','sendo',
+          'cliente','informou','relata','constatado','analise','verificado','segue','anexo','ticket','ola','bom','dia','tarde','favor','att','grato'
+      ]),
       
       stem(word) {
         if (!word || word.length < 4) return word;
         return word.replace(/(?:(s|es|a|o|am|em|indo|endo|ando|ada|ado|aram|iram))$/, '');
       },
       
-      tokenize(text) {
+      tokenize(text, contextPart = null) {
         if (!text) return [];
-        let rawWords = text.toString().toLowerCase()
-          .replace(/[^\w\s\u00C0-\u00FF]/gi, ' ') 
-          .split(/\s+/)
+        
+        // 1. Normalização
+        let normalized = text.toString().toLowerCase()
+            .normalize("NFD").replace(/[\u0300-\u036f]/g, "") 
+            .replace(/[^\w\s]/gi, ' ');
+
+        // 2. Tratamento de Negação: "não liga" -> "NOT_liga"
+        normalized = normalized.replace(/\b(nao|sem|nunca|jamais)\s+(\w+)/g, 'NOT_$2');
+
+        let rawWords = normalized.split(/\s+/)
           .filter(w => w.length > 2 && !this.stopWords.has(w));
 
-        rawWords = rawWords.map(w => window.MLService.config.synonyms[w] || w);
-        const stems = rawWords.map(w => this.stem(w));
+        // 3. Aplicação de Sinônimos e Stemming
+        const processedWords = rawWords.map(w => {
+            const isNeg = w.startsWith('NOT_');
+            const coreWord = isNeg ? w.replace('NOT_', '') : w;
+            const synonym = window.MLService.config.synonyms[coreWord] || coreWord;
+            const stemmed = this.stem(synonym);
+            return isNeg ? `NOT_${stemmed}` : stemmed;
+        });
 
+        // 4. Geração de Bigramas (Contexto local)
         const bigrams = [];
-        for (let i = 0; i < stems.length - 1; i++) {
-           bigrams.push(stems[i] + "_" + stems[i+1]);
+        for (let i = 0; i < processedWords.length - 1; i++) {
+           bigrams.push(processedWords[i] + "_" + processedWords[i+1]);
         }
-        return [...stems, ...bigrams];
+        
+        let finalTokens = [...processedWords, ...bigrams];
+
+        // 5. CROSS-FEATURES (O ajuste da Coluna J)
+        // Se a família da peça foi informada, cria tokens de contexto
+        if (contextPart) {
+            const cleanPart = contextPart.toString().toLowerCase().trim().replace(/\s+/g, '');
+            // Cria tokens como: CTX_placamae_curto, CTX_memoria_telaazul
+            processedWords.forEach(word => {
+                finalTokens.push(`CTX_${cleanPart}_${word}`);
+            });
+        }
+
+        return finalTokens;
       }
     },
 
@@ -72,18 +112,17 @@ window.MLService = {
     train(dataset) {
       this.reset();
       if(!dataset || dataset.length === 0) return;
-
       const tempWordCounts = {}; 
 
+      // Mapeamento de Classes
       const labelMap = {
           'aprovado pagamento': 'ok_pagamento', 'pagar': 'ok_pagamento', 'ok_pagamento': 'ok_pagamento', 'ok': 'ok_pagamento',
-          'reprovado pagamento': 'nao_pagar', 'reprovado': 'nao_pagar', 'nao_pagar': 'nao_pagar', 'não pagar': 'nao_pagar',
+          'reprovado pagamento': 'nao_pagar', 'reprovado': 'nao_pagar', 'nao_pagar': 'nao_pagar',
           'avaria customiza': 'avaria_parceiro', 'parceiro': 'avaria_parceiro', 'avaria_parceiro': 'avaria_parceiro', 'avaria': 'avaria_parceiro'
       };
 
-      dataset.forEach(originalItem => {
-        const item = { ...originalItem };
-        
+      dataset.forEach(item => {
+        // Normalização das Labels
         const processo = (item.processo || item['Processo?'] || '').toString().toLowerCase();
         const avaria = (item.avariaCust || item['Avaria customiza?'] || '').toString().toLowerCase();
         let rawCat = (item.categoria || item.Considerações || '').toString().toLowerCase().trim();
@@ -101,13 +140,19 @@ window.MLService = {
         this.categories[finalCat].docCount++;
         this.docCount++;
         
+        // --- EXTRAÇÃO DA COLUNA J (Família/Peça) ---
+        // Tenta encontrar a coluna de família com base nos nomes comuns
+        const partContext = item['Familia'] || item['Família'] || item['familia'] || item['Produto'] || item['produto'] || '';
+        
         const textToLearn = item.texto || item['Detalhe o problema encontrado'];
-        const tokens = this.tokenizer.tokenize(textToLearn);
+        const tokens = this.tokenizer.tokenize(textToLearn, partContext);
         
         tokens.forEach(token => {
            tempWordCounts[token] = (tempWordCounts[token] || 0) + 1;
            let weight = 1;
+           
            if (window.MLService.config.importantFeatures.has(token)) weight = 4;
+           if (token.startsWith('CTX_')) weight = 2; // Peso extra para contexto de peça
 
            if(!this.categories[finalCat].wordCounts[token]) this.categories[finalCat].wordCounts[token] = 0;
            this.categories[finalCat].wordCounts[token] += weight;
@@ -115,6 +160,7 @@ window.MLService = {
         });
       });
 
+      // Limpeza de vocabulário raro
       const minFreq = window.MLService.config.minWordFrequency;
       Object.keys(this.categories).forEach(cat => {
           const catData = this.categories[cat];
@@ -130,9 +176,10 @@ window.MLService = {
       console.log(`ML Treinado. Classes Ativas: ${Object.keys(this.categories).join(', ')}`);
     },
     
-    classify(text, forbiddenCategories = []) {
+    classify(text, forbiddenCategories = [], contextPart = null) {
       if (!text || this.docCount === 0) return { category: 'indefinido', reason: 'Sem dados de treino' };
-      const tokens = this.tokenizer.tokenize(text);
+      
+      const tokens = this.tokenizer.tokenize(text, contextPart);
       if (tokens.length === 0) return { category: 'indefinido', reason: 'Texto insuficiente' };
 
       let bestCategory = null;
@@ -169,17 +216,19 @@ window.MLService = {
       if (bestCategory && confident) {
           const catData = this.categories[bestCategory];
           tokens.forEach(t => {
-             if ((catData.wordCounts[t] && catData.wordCounts[t] > 0) || window.MLService.config.importantFeatures.has(t)) {
-                 evidences.push(t);
+             if ((catData.wordCounts[t] && catData.wordCounts[t] > 0)) {
+                 // Formata para exibição legível
+                 let displayToken = t.replace('CTX_', 'Contexto:').replace('NOT_', 'Não:');
+                 evidences.push(displayToken);
              }
           });
       }
-
+      
       const uniqueEvidence = [...new Set(evidences)].slice(0, 5).join(', ');
 
       return {
           category: confident ? bestCategory : 'indefinido',
-          reason: confident ? `Padrão de palavras: ${uniqueEvidence}` : 'Confiança baixa',
+          reason: confident ? `Padrão: ${uniqueEvidence}` : 'Confiança baixa',
           confidence: gap
       };
     }
@@ -187,76 +236,100 @@ window.MLService = {
 
   train(data) { this.model.train(data); },
   
-  // --- NOVA FUNÇÃO: DETECTOR DE CONTRADIÇÃO ---
+  // --- DETECTOR DE CONTRADIÇÃO ---
   detectarContradicao(text, context) {
       if (!text) return null;
-      
-      // 1. Normaliza o texto (remove acentos e deixa minúsculo)
       const t = text.toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
       
-      // 2. Dicionários de "Crime" e "Agente"
-      // Palavras que indicam QUEM causou o dano
+      // Palavras que indicam Agente Interno
       const agentes = ['tecnico', 'tc ', 'montador', 'montagem', 'manuseio', 'organizacao', 'manuzeio'];
       
-      // Palavras que indicam O QUE aconteceu (Dano físico/Ação)
-      const acoesDano = ['amassou', 'amassado', 'entortou', 'entortado', 'quebrou', 'quebrado', 'cortou', 'cortado', 'riscou', 'riscado', 'derrubou', 'espanou', 'pino torto', 'pino amassado', 'avaria', 'rompido', 'trincado'];
+      // Palavras que indicam Avaria Física
+      const acoesDano = ['amassou', 'amassado', 'entortou', 'entortado', 'quebrou', 'quebrado', 'cortou', 'cortado', 'riscou', 'riscado', 'derrubou', 'espanou', 'pino torto', 'pino amassado', 'avaria', 'rompido', 'trincado', 'descascando'];
 
-      // 3. Verifica se o texto contém Agente E Ação
       const temAgente = agentes.some(ag => t.includes(ag));
       const temDano = acoesDano.some(ac => t.includes(ac));
-      const isFabrica = t.includes('fabrica'); // Evita falso positivo tipo "defeito de fabrica"
+      const isFabrica = t.includes('fabrica'); 
 
-      // 4. Lógica Sherlock Holmes:
-      // Se tem Agente + Dano e NÃO é defeito de fábrica, é Parceiro.
+      // 1. Confissão Explícita: Agente + Dano -> Parceiro
       if (temAgente && temDano && !isFabrica) {
           return {
               category: 'avaria_parceiro',
-              reason: '🚩 CONTRADIÇÃO: Texto descreve avaria causada pelo técnico/processo interno.',
-              confidence: 5.0, // Confiança Máxima
+              reason: '🚩 CONTRADIÇÃO: Texto descreve avaria causada por técnico/processo interno.',
+              confidence: 5.0, 
               isContradiction: true
           };
       }
       
-      // Se apenas menciona o agente em contexto de quarentena, já é forte indício
+      // 2. Indício Forte em Quarentena (Menção de técnico)
       if (temAgente && !isFabrica) {
            return {
               category: 'avaria_parceiro',
-              reason: 'Hard Rule: Menção de intervenção técnica (Montagem/Manuseio).',
+              reason: 'Regra Rígida: Intervenção técnica citada no problema.',
               confidence: 4.5
           };
       }
-
       return null;
   },
 
   predict(text, context) {
-      let forbidden = [];
-      
-      // 1. REGRAS RÍGIDAS DE METADADOS (O que o usuário marcou)
+      // 1. REGRAS DE METADADOS (Prioridade ao que foi marcado explicitamente)
       if (context) {
           const avariaInput = (context.avariaCust || context['Avaria customiza?'] || '').toString().trim().toLowerCase();
           const processo = (context.processo || context['Processo?'] || '').toString().trim().toLowerCase();
 
-          // Se o usuário marcou SIM, confiamos nele.
-          if (avariaInput.includes('sim')) {
-              return { category: 'avaria_parceiro', reason: 'Regra: Checkbox Avaria marcado como SIM' };
+          if (avariaInput.includes('sim')) return { category: 'avaria_parceiro', reason: 'Regra: Checkbox Avaria marcado como SIM' };
+          if (processo.includes('antes')) return { category: 'nao_pagar', reason: 'Regra: Problema anterior à montagem' };
+      }
+
+      // 2. DETECTOR DE CONTRADIÇÃO (Pega o erro humano de preenchimento)
+      const resultadoContradicao = this.detectarContradicao(text, context);
+      if (resultadoContradicao) return resultadoContradicao;
+
+      // 3. IA (Naive Bayes com Cross-Features + Segmentação)
+      // Tenta extrair a peça da Coluna J (Familia/Produto)
+      let partName = null;
+      if (context) {
+          partName = context['Familia'] || context['Família'] || context['familia'] || context['Produto'] || context['produto'] || null;
+      }
+
+      // --- ESTRATÉGIA: DIVIDE & CONQUER (Para textos com múltiplos defeitos) ---
+      // Se houver delimitadores como '|', ';', ou padrões '[1]', '[2]'
+      // Quebra o texto e analisa cada parte. Se qualquer uma for 'Pagar', o todo vira 'Pagar'.
+      if (text && (text.includes('|') || text.includes(';') || /\[\d+\]/.test(text))) {
+          const ocorrencias = text.split(/\||;|\s+E\s+|\[\d+\]/i).filter(s => s && s.trim().length > 3);
+          
+          let melhorResultado = null;
+          
+          for (let parte of ocorrencias) {
+              const res = this.model.classify(parte, [], partName);
+              
+              // Hierarquia de Severidade:
+              // avaria_parceiro > ok_pagamento > nao_pagar
+              
+              if (!melhorResultado) {
+                  melhorResultado = res;
+              } else {
+                  // Se achou um "Parceiro" ou "Pagar", substitui o "Reprovado" anterior
+                  if (res.category === 'avaria_parceiro') {
+                      melhorResultado = res; // Parceiro é o mais grave (alerta)
+                      break; 
+                  }
+                  if (res.category === 'ok_pagamento' && melhorResultado.category !== 'avaria_parceiro') {
+                      melhorResultado = res; // Pagar ganha de Reprovado
+                  }
+              }
           }
           
-          // Se erro antes da montagem
-          if (processo.includes('antes')) {
-               return { category: 'nao_pagar', reason: 'Regra: Problema identificado ANTES da montagem' };
+          if (melhorResultado) {
+              // Adiciona nota explicativa de que foi uma análise composta
+              melhorResultado.reason = `[Análise Composta] ${melhorResultado.reason}`;
+              return melhorResultado;
           }
       }
-
-      // 2. DETECTOR DE CONTRADIÇÃO (Onde o usuário marcou NÃO ou esqueceu, mas o texto confessa)
-      // Esta etapa agora protege contra o erro humano de preenchimento
-      const resultadoContradicao = this.detectarContradicao(text, context);
-      if (resultadoContradicao) {
-          return resultadoContradicao;
-      }
-
-      // 3. IA (Naive Bayes) - Só roda se não caiu nas regras acima
-      return this.model.classify(text, forbidden);
+      
+      // Se não for texto composto, analisa normalmente
+      return this.model.classify(text, [], partName);
   }
 };
 </script>
