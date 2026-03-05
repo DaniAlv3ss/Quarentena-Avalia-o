@@ -55,6 +55,9 @@ window.MLService = {
       
       stem(word) {
         if (!word || word.length < 4) return word;
+        // Não aplicar stemming em features importantes ou sinônimos registrados
+        if (window.MLService.config.importantFeatures.has(word)) return word;
+        if (window.MLService.config.synonyms[word]) return word;
         return word.replace(/(?:(s|es|a|o|am|em|indo|endo|ando|ada|ado|aram|iram))$/, '');
       },
       
@@ -211,7 +214,7 @@ window.MLService = {
       });
       
       const gap = maxProb - secondMaxProb;
-      const confident = !isNaN(gap) && gap >= window.MLService.config.confidenceThreshold;
+      const confident = isFinite(gap) && gap >= window.MLService.config.confidenceThreshold;
       
       if (bestCategory && confident) {
           const catData = this.categories[bestCategory];

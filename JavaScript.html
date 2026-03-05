@@ -3,7 +3,7 @@
 
   // --- CONFIG ---
   const AppConfig = {
-    TAXA_MONTAGEM: 189.90,
+    TAXA_MONTAGEM: 202.72,
     KABUM_SEARCH_URL: 'https://www.kabum.com.br/busca/'
   };
 
@@ -146,9 +146,9 @@
       const getBtnClass = (curr, type, color) => {
           const active = normalizeKey(curr) === type;
           const base = `w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 border shadow-sm hover:scale-110 active:scale-95`;
-          if (color === 'emerald') return active ? 'bg-emerald-600 text-white border-emerald-500' : 'bg-white text-slate-400 border-slate-200 hover:text-emerald-500 hover:border-emerald-200';
-          if (color === 'amber') return active ? 'bg-amber-600 text-white border-amber-500' : 'bg-white text-slate-400 border-slate-200 hover:text-amber-500 hover:border-amber-200';
-          if (color === 'rose') return active ? 'bg-rose-600 text-white border-rose-500' : 'bg-white text-slate-400 border-slate-200 hover:text-rose-500 hover:border-rose-200';
+          if (color === 'emerald') return active ? `${base} bg-emerald-600 text-white border-emerald-500` : `${base} bg-white text-slate-400 border-slate-200 hover:text-emerald-500 hover:border-emerald-200`;
+          if (color === 'amber') return active ? `${base} bg-amber-600 text-white border-amber-500` : `${base} bg-white text-slate-400 border-slate-200 hover:text-amber-500 hover:border-amber-200`;
+          if (color === 'rose') return active ? `${base} bg-rose-600 text-white border-rose-500` : `${base} bg-white text-slate-400 border-slate-200 hover:text-rose-500 hover:border-rose-200`;
           return base;
       };
 
@@ -225,10 +225,12 @@
           historySelectedSession.value = session;
           
           runGoogle('carregarSessaoAntiga', session.id)
-            .then(data => {
+            .then(async data => {
                 historyViewMode.value = 'detail';
                 processServerData(data, null, true); 
                 
+                await nextTick(); // espera o shallowRef propagar
+
                 let acertos = 0;
                 let total = 0;
                 (historyDetailData.value || []).forEach(item => {
@@ -513,7 +515,7 @@
       };
 
       const registrarAprendizado = (item, decision) => {
-           if (!item._subRecords.length) return;
+           if (!item._subRecords || !item._subRecords.length) return;
            const last = item._subRecords[item._subRecords.length - 1];
            
            let textoLimpo = (last.detalhe || '').trim();
@@ -523,7 +525,7 @@
                 const now = new Date();
                 const dateString = now.toLocaleDateString('pt-BR') + ' ' + now.toLocaleTimeString('pt-BR');
                 
-                const tipoProblema = item.tipoProb || item._subRecords.map(s => s.tipoProb).join(' | ') || '';
+                const tipoProblema = (item._subRecords || []).map(s => s.tipoProb).filter(Boolean).join(' | ') || '';
                 const motivoComposto = tipoProblema ? `${last.problema} [${tipoProblema}]` : last.problema;
 
                 const payload = {
@@ -544,6 +546,7 @@
 
       // --- AI MODAL LOGIC ---
       const openAiModal = () => {
+        if (!window.MLService) return showToast("Serviço de IA não está disponível.", "error");
         const list = [];
         (sessionData.value || []).forEach(item => {
             if (normalizeKey(item._status) !== 'pendente') return;

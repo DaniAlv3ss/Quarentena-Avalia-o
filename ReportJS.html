@@ -34,7 +34,12 @@ window.ReportService = {
 
     // Processa os dados para "Aplanar" objetos complexos (Flatten)
     const flatData = dados.map(item => {
-        const flat = { ...item };
+        const flat = {};
+        // Copiar apenas campos primitivos públicos (excluir campos internos _*)
+        Object.keys(item).forEach(k => {
+            if (k.startsWith('_')) return; // pular campos internos
+            flat[k] = item[k];
+        });
         
         // Pega dados da última ocorrência para facilitar leitura
         if (item._subRecords && item._subRecords.length > 0) {
@@ -47,6 +52,8 @@ window.ReportService = {
         }
         
         flat.STATUS_FINAL = this.formatStatus(item._status);
+        flat.CUSTO_TOTAL = item._custoTotal || 0;
+        flat.SUGESTAO_IA = item._sugestao || '';
         
         return flat;
     });
@@ -67,7 +74,6 @@ window.ReportService = {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.width;
-    const pageHeight = doc.internal.pageSize.height;
     
     // --- CABEÇALHO PADRÃO ---
     doc.setFillColor(...this.colors.header);
@@ -92,7 +98,7 @@ window.ReportService = {
     this.drawCard(doc, 14, currentY, 55, 
         "Custo Montagem", 
         this.formatCurrency(stats.assemblyCost), // Valor direto da montagem
-        `${stats.approvedCount} aprovados x R$ 189,90`, 
+        `${stats.approvedCount} aprovados x R$ 202,72`, 
         [22, 163, 74]); // Green
 
     // Card 2: Avaria Parceiro
