@@ -6,6 +6,7 @@
 
 const CONFIG = {
   ID_PLANILHA_DADOS: '10l1w3d3HYSKFgSsnjOZ545efR-bdIECEkOR82IjV3TE', 
+  ID_PLANILHA_PRINCIPAL: '10l1w3d3HYSKFgSsnjOZ545efR-bdIECEkOR82IjV3TE', // mesma planilha principal
   NOME_ABA_DADOS: 'Divergência',
   ID_PLANILHA_CUSTOS: '1CEexqCPUyP5b4Qra1tt5qWyBIUW0lfIoYIEvYgBFhtA', 
   NOME_ABA_CUSTOS: 'Base de CFs',
@@ -103,11 +104,11 @@ function salvarAprendizado(dados) {
       const lastRow = aba.getLastRow();
       if(lastRow > 0) aba.getRange(lastRow, 8).setNumberFormat("R$ #,##0.00");
     }
-  } catch(e) {}
+  } catch(e) { console.error('Erro ao salvar aprendizado:', e); }
 }
 
 function obterResumoHistorico() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.openById(CONFIG.ID_PLANILHA_PRINCIPAL);
   const aba = ss.getSheetByName(CONFIG.NOME_ABA_HISTORICO);
   if (!aba) return { global: { acertos: 0, total: 0, percent: 0 }, sessoes: [] };
 
@@ -169,7 +170,7 @@ function obterResumoHistorico() {
 }
 
 function listarSessoesSalvas() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.openById(CONFIG.ID_PLANILHA_PRINCIPAL);
   const aba = ss.getSheetByName(CONFIG.NOME_ABA_HISTORICO);
   if (!aba) return [];
   const dados = aba.getDataRange().getValues();
@@ -182,7 +183,7 @@ function listarSessoesSalvas() {
 }
 
 function carregarSessaoAntiga(idSessao) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.openById(CONFIG.ID_PLANILHA_PRINCIPAL);
   const aba = ss.getSheetByName(CONFIG.NOME_ABA_HISTORICO);
   if (!aba) throw new Error("Histórico não encontrado.");
   const dados = aba.getDataRange().getDisplayValues();
@@ -205,7 +206,7 @@ function carregarSessaoAntiga(idSessao) {
 }
 
 function salvarSessaoNaPlanilha(nomeSessao, dados, isUpdate) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.openById(CONFIG.ID_PLANILHA_PRINCIPAL);
   let aba = ss.getSheetByName(CONFIG.NOME_ABA_HISTORICO);
   const headers = ["OS", "Técnico", "Problema/Detalhe", "Evidência", "CF Antigo", "Custo Antigo", "CF Novo", "Custo Novo", "Total Geral", "Sugestão IA", "Decisão", "Data Auditoria", "ID Sessão"];
   if (!aba) {
@@ -250,11 +251,12 @@ function buscarDadosDivergencia(setFiltro = null) {
     const lr = aba.getLastRow();
     const lc = aba.getLastColumn();
     if (lr < 2) return [];
-    const range = aba.getRange(2, 1, lr - 1, lc);
-    const values = range.getDisplayValues();
-    const headers = values[0].map(h => String(h).trim().toUpperCase());
+    // Ler headers da linha 1
+    const headers = aba.getRange(1, 1, 1, lc).getDisplayValues()[0].map(h => String(h).trim().toUpperCase());
+    // Ler dados a partir da linha 2
+    const values = aba.getRange(2, 1, lr - 1, lc).getDisplayValues();
     const result = [];
-    for (let i = 1; i < values.length; i++) {
+    for (let i = 0; i < values.length; i++) {
       const r = values[i];
       if (setFiltro) {
          const osNaLinha = String(r[5] || '').trim().toUpperCase();
@@ -310,7 +312,7 @@ function enriquecerComCustos(dados, dadosProdutos) {
     const cfNov = String(row['CF PRODUTO NOVO']||'').trim().toUpperCase();
     const pAnt = dadosProdutos[cfAnt] || { preco: 0, desc: '' };
     const pNov = dadosProdutos[cfNov] || { preco: 0, desc: '' };
-    row._custoAntigo = pAnt.preco; row._custoNovo = pNov.preco; row._custoTotal = pNov.preco; 
+    row._custoAntigo = pAnt.preco; row._custoNovo = pNov.preco; row._custoTotal = pAnt.preco + pNov.preco; 
     row._descAntigo = pAnt.desc; row._descNovo = pNov.desc;
   });
   return dados;
